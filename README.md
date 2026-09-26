@@ -1,4 +1,4 @@
-<img width="621" height="346" alt="Screenshot" src="https://github.com/user-attachments/assets/18cbf3aa-5fd4-4717-ad61-e4a592ea23b1" /><p align="center">
+<p align="center">
   <img src="assets/icon.png" width="120" alt="ClaudexBar">
 </p>
 
