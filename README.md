@@ -1,4 +1,4 @@
-<p align="center">
+<img width="621" height="346" alt="Screenshot" src="https://github.com/user-attachments/assets/18cbf3aa-5fd4-4717-ad61-e4a592ea23b1" /><p align="center">
   <img src="assets/icon.png" width="120" alt="ClaudexBar">
 </p>
 
@@ -23,10 +23,10 @@
 
 A small native macOS menu-bar app that shows **Codex** and **Claude Code** usage limits at a glance. Zero-config: it reuses your existing CLI login, shows each provider's session (5-hour) and weekly windows, and warns before you run low — no API keys, no browser cookies, no dependencies.
 
-## Demo
+## Screenshots
 
 <p align="center">
-  <img src="assets/demo.gif" width="640" alt="ClaudexBar demo"><br>
+  <img src="assets/Screenshot.png" width="640" alt="ClaudexBar"><br>
   <em>Codex &amp; Claude Code usage right in the menu bar — right-click for the menu, hold ⌥ Option for re-auth.</em>
 </p>
 
