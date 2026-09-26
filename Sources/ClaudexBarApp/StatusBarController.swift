@@ -44,6 +44,7 @@ final class StatusBarController: NSObject {
     private var scheduledResetCheckTimers: [ProviderID: Timer] = [:]
     private var scheduledResetCheckFor: [ProviderID: Date] = [:]
     private var pendingHighConfidenceCheck: Set<ProviderID> = []
+    private var wakeObserver: NSObjectProtocol?
     private var providerSelection: ProviderSelection {
         get {
             ProviderSelection(activeProvider: settings.activeProvider, enabledProviders: settings.enabledProviders)
@@ -64,16 +65,35 @@ final class StatusBarController: NSObject {
 
     func start() {
         AppPaths.ensureDirectories()
+        AppPaths.housekeeping()
         settings.removeLegacyCodexAccountSettings()
         requestNotificationAuthorizationIfAvailable()
         smartSwitchEngine = SmartProviderSwitchEngine(activeProvider: settings.activeProvider)
         configureButton()
+        observeWake()
         updateImage()
         refreshAll()
         scheduleTimers()
         configureCLIUpdates()
         checkCLIUpdatesQuietly()
         checkForUpdatesQuietly()
+    }
+
+    /// Refresh shortly after the Mac wakes instead of waiting for the next
+    /// timer tick: after a long sleep every snapshot is stale, and a window
+    /// may have reset overnight. The short delay lets Wi‑Fi/VPN reconnect.
+    private func observeWake() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                guard let self else { return }
+                self.logger.log(provider: self.activeProvider, message: "woke from sleep, refreshing")
+                self.refreshAll()
+            }
+        }
     }
 
     private var activeEnabledProvider: ProviderID? {
@@ -249,13 +269,19 @@ final class StatusBarController: NSObject {
         guard !autoStartInFlight.contains(provider) else { return }
 
         let highConfidence = pendingHighConfidenceCheck.remove(provider) != nil
+        let wasBroken = autoStarter.currentState(provider: provider).circuitBroken
         let decision = autoStarter.evaluate(provider: provider, snapshot: snapshot, now: Date(), highConfidence: highConfidence)
-        guard case .start = decision else {
-            if case .skip(.circuitBroken) = decision {
-                logger.log(provider: provider, message: "auto-start: disabled after repeated failed anchors — toggle off/on to retry")
-            }
-            return
+        let isBroken = autoStarter.currentState(provider: provider).circuitBroken
+
+        // Log/notify on breaker *transitions* only — not on every poll.
+        if isBroken, !wasBroken {
+            logger.log(provider: provider, message: "auto-start: paused after repeated anchors that didn't start the window — re-arms in 24h or toggle off/on")
+            notifyAutoStartPaused(provider: provider)
+        } else if wasBroken, !isBroken {
+            logger.log(provider: provider, message: "auto-start: re-armed")
         }
+
+        guard case .start = decision else { return }
 
         autoStartInFlight.insert(provider)
         autoStarter.recordAttempt(provider: provider, now: Date())
@@ -268,12 +294,26 @@ final class StatusBarController: NSObject {
                 self.autoStartInFlight.remove(provider)
                 switch result {
                 case .success:
+                    self.autoStarter.recordLaunchSucceeded(provider: provider)
                     self.logger.log(provider: provider, message: "auto-start: anchor message sent")
                 case .failure(let error):
-                    self.logger.log(provider: provider, message: "auto-start: anchor failed (\(error))")
+                    self.autoStarter.recordLaunchFailed(provider: provider, now: Date())
+                    let retryIn = self.autoStarter.currentState(provider: provider).retryNotBefore
+                        .map { max(1, Int(($0.timeIntervalSinceNow / 60).rounded())) }
+                    let retryText = retryIn.map { ", retrying in ~\($0) min" } ?? ""
+                    self.logger.log(provider: provider, message: "auto-start: anchor failed (\(error))\(retryText)")
                 }
             }
         }
+    }
+
+    private func notifyAutoStartPaused(provider: ProviderID) {
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "ClaudexBar"
+        content.body = "Auto-start for \(provider.displayName) is paused: anchor messages didn’t start the 5h window. It re-arms in 24 hours, or toggle it off and on."
+        let request = UNNotificationRequest(identifier: "autostart-paused-\(provider.rawValue)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     /// Arms a one-shot timer for shortly after a *known* reset boundary, so
@@ -470,7 +510,7 @@ final class StatusBarController: NSObject {
                 item.state = .off
             } else {
                 item.title = enabled && state.circuitBroken
-                    ? "\(provider.displayName) (paused — repeated failures)"
+                    ? "\(provider.displayName) (paused — re-arms within 24h)"
                     : provider.displayName
                 item.state = enabled ? .on : .off
             }

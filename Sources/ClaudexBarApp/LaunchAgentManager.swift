@@ -49,12 +49,20 @@ enum LaunchAgentManager {
         try? FileManager.default.removeItem(at: AppPaths.launchAgent)
     }
 
+    /// Synchronous on purpose: install/uninstall issue bootout then bootstrap
+    /// back-to-back, and bootstrap must not race a bootout still in flight.
+    /// launchctl returns almost instantly, so blocking here is harmless.
     private static func runLaunchctl(_ arguments: [String]) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try? process.run()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
     }
 }

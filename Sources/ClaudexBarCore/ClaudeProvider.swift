@@ -153,17 +153,12 @@ public struct ClaudeProvider: UsageProvider {
         return ClaudeCredentials(accessToken: accessToken, refreshToken: rotated ?? fallbackRefreshToken, expiresAt: expiresAt)
     }
 
+    /// Same `application/x-www-form-urlencoded` encoder as the sign-in flow.
+    /// (The previous local encoder used `.urlQueryAllowed`, which leaves `+`,
+    /// `&` and `=` unescaped — harmless for today's token alphabet, but a `+`
+    /// in a form body decodes as a space and `&`/`=` would split the field.)
     private func formBody(_ values: [String: String]) -> Data {
-        let body = values.map { key, value in
-            "\(urlEncode(key))=\(urlEncode(value))"
-        }
-        .sorted()
-        .joined(separator: "&")
-        return Data(body.utf8)
-    }
-
-    private func urlEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
+        ClaudeOAuthFlow.formBody(values)
     }
 }
 

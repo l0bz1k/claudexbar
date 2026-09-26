@@ -303,6 +303,172 @@ func testAutoStartResetsHistoryAcrossAnOrganicWindowResetGap() throws {
     )
 }
 
+// MARK: - v0.2.1: launch failures, breaker recovery, persistence, Codex headers
+
+private func idleClaudeSnapshot(_ now: Date) -> UsageSnapshot {
+    UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil),
+        secondary: nil,
+        fetchedAt: now
+    )
+}
+
+func testAutoStartLaunchFailureRollsBackAndBacksOff() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(launchRetryBaseDelay: 5 * 60, launchRetryMaxDelay: 60 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    starter.recordAttempt(provider: .claude, now: t0)
+    starter.recordLaunchFailed(provider: .claude, now: t0)
+    let state = starter.currentState(provider: .claude)
+    try expect(state.attemptsInLast24h.isEmpty, "a failed launch must not count toward the daily cap")
+    try expect(state.lastAttemptAt == nil, "a failed launch must not start the multi-hour cooldown")
+    try expect(state.pendingConfirmationSince == nil, "a failed launch must not await confirmation")
+
+    let during = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(t0.addingTimeInterval(60)), now: t0.addingTimeInterval(60), highConfidence: true)
+    try expect(during == .skip(reason: .launchBackoff), "within the backoff window a retry must wait")
+
+    let after = t0.addingTimeInterval(6 * 60)
+    let retry = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(after), now: after, highConfidence: true)
+    try expect(retry == .start, "once the short backoff passes, it retries — not 5 hours later")
+}
+
+func testAutoStartLaunchFailuresNeverTripBreakerAndBackoffCaps() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(confirmationGracePeriod: 60, launchRetryBaseDelay: 5 * 60, launchRetryMaxDelay: 60 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    var delays: [TimeInterval] = []
+    for _ in 0..<8 {
+        starter.recordAttempt(provider: .claude, now: now)
+        starter.recordLaunchFailed(provider: .claude, now: now)
+        let retryAt = try expectNonNil(starter.currentState(provider: .claude).retryNotBefore, "backoff scheduled")
+        delays.append(retryAt.timeIntervalSince(now))
+        now = retryAt.addingTimeInterval(1)
+        _ = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(now), now: now)
+    }
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "network/CLI failures must never trip the breaker")
+    try expect(delays.prefix(4) == [300, 600, 1200, 2400], "backoff doubles from 5 minutes: \(delays)")
+    try expect(delays.last == 3600, "backoff is capped at 1 hour: \(delays)")
+
+    starter.recordAttempt(provider: .claude, now: now)
+    starter.recordLaunchSucceeded(provider: .claude)
+    let state = starter.currentState(provider: .claude)
+    try expect(state.consecutiveLaunchFailures == 0 && state.retryNotBefore == nil, "a successful launch clears the backoff")
+}
+
+func testAutoStartBreakerAutoResetsAfterCoolingOff() throws {
+    let store = InMemoryAutoStartStore()
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    store.setState(AutoStartState(circuitBroken: true, circuitBrokenAt: t0), for: .claude)
+    let starter = SessionAutoStarter(store: store, config: AutoStartConfig(circuitBreakerAutoReset: 24 * 60 * 60))
+
+    let early = t0.addingTimeInterval(23 * 60 * 60)
+    try expect(
+        starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(early), now: early) == .skip(reason: .circuitBroken),
+        "the breaker holds during the cooling-off period"
+    )
+    let later = t0.addingTimeInterval(24 * 60 * 60 + 1)
+    _ = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(later), now: later)
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "the breaker re-arms by itself after 24h")
+}
+
+func testAutoStartClearsBreakerTrippedByLegacyVersion() throws {
+    // v0.2.0 persisted `circuitBroken: true` without a timestamp, and tripped
+    // it on network-level launch failures. Such state must not stay stuck.
+    let store = InMemoryAutoStartStore()
+    store.setState(AutoStartState(circuitBroken: true, circuitBrokenAt: nil), for: .claude)
+    let starter = SessionAutoStarter(store: store)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(now), now: now)
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "a legacy (timestamp-less) trip is cleared on upgrade")
+}
+
+func testAutoStartStateDecodesOlderPersistedShape() throws {
+    // Exactly the keys v0.2.0 wrote — none of the v0.2.1 additions.
+    let legacyJSON = #"""
+    {"samples":[],"nilResetObservationCount":2,"attemptsInLast24h":[700000000],
+     "lastAttemptAt":700000000,"consecutiveUnconfirmed":1,"circuitBroken":false}
+    """#
+    let state = try JSONDecoder().decode(AutoStartState.self, from: Data(legacyJSON.utf8))
+    try expect(state.attemptsInLast24h.count == 1, "older state keeps its daily-cap history")
+    try expect(state.lastAttemptAt != nil, "older state keeps its cooldown")
+    try expect(state.consecutiveUnconfirmed == 1 && state.nilResetObservationCount == 2, "older counters survive")
+    try expect(state.consecutiveLaunchFailures == 0 && state.retryNotBefore == nil, "new fields default cleanly")
+}
+
+private struct StubCodexAuth: CodexAuthReading {
+    let accountID: String?
+    func readAccessToken() throws -> String { "test-token" }
+    func readAccountID() -> String? { accountID }
+}
+
+private final class CapturingHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured: URLRequest?
+    private let body: Data
+
+    init(body: Data) { self.body = body }
+
+    var lastRequest: URLRequest? {
+        lock.lock(); defer { lock.unlock() }
+        return captured
+    }
+
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        lock.withLock { captured = request }
+        return HTTPResponse(data: body, statusCode: 200)
+    }
+}
+
+private func runBlocking<T: Sendable>(_ operation: @escaping @Sendable () async -> T) -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = ResultBox<T>()
+    Task.detached {
+        box.value = await operation()
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value!
+}
+
+private final class ResultBox<T>: @unchecked Sendable {
+    var value: T?
+}
+
+func testCodexSendsAccountIDHeaderWhenKnown() throws {
+    let body = try fixtureData("codex_usage")
+    let withID = CapturingHTTPClient(body: body)
+    _ = runBlocking { await CodexProvider(authReader: StubCodexAuth(accountID: "acct-123"), httpClient: withID).fetchUsage() }
+    try expect(withID.lastRequest?.value(forHTTPHeaderField: "chatgpt-account-id") == "acct-123", "account id is forwarded")
+
+    let withoutID = CapturingHTTPClient(body: body)
+    _ = runBlocking { await CodexProvider(authReader: StubCodexAuth(accountID: nil), httpClient: withoutID).fetchUsage() }
+    try expect(withoutID.lastRequest != nil, "request was made")
+    try expect(withoutID.lastRequest?.value(forHTTPHeaderField: "chatgpt-account-id") == nil, "no header when unknown")
+}
+
+func testCodexAuthReaderReadsAccountID() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let withID = dir.appendingPathComponent("with.json")
+    try Data(#"{"tokens":{"access_token":"t","account_id":" db451ad8 "}}"#.utf8).write(to: withID)
+    try expect(CodexAuthReader(authURL: withID).readAccountID() == "db451ad8", "account_id is read and trimmed")
+
+    let blank = dir.appendingPathComponent("blank.json")
+    try Data(#"{"tokens":{"access_token":"t","account_id":""}}"#.utf8).write(to: blank)
+    try expect(CodexAuthReader(authURL: blank).readAccountID() == nil, "an empty account_id is treated as unknown")
+}
+
+func testClaudeTokenRefreshBodyEscapesReservedCharacters() throws {
+    let body = String(decoding: ClaudeOAuthFlow.formBody(["refresh_token": "a+b&c=d"]), as: UTF8.self)
+    try expect(body == "refresh_token=a%2Bb%26c%3Dd", "+, & and = are escaped in form bodies: \(body)")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -952,6 +1118,14 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("auto-start launch failure rolls back and backs off", testAutoStartLaunchFailureRollsBackAndBacksOff),
+    ("auto-start launch failures never trip breaker; backoff caps", testAutoStartLaunchFailuresNeverTripBreakerAndBackoffCaps),
+    ("auto-start breaker auto-resets after cooling off", testAutoStartBreakerAutoResetsAfterCoolingOff),
+    ("auto-start clears breaker tripped by legacy version", testAutoStartClearsBreakerTrippedByLegacyVersion),
+    ("auto-start state decodes older persisted shape", testAutoStartStateDecodesOlderPersistedShape),
+    ("Codex sends chatgpt-account-id when known", testCodexSendsAccountIDHeaderWhenKnown),
+    ("Codex auth reader reads account_id", testCodexAuthReaderReadsAccountID),
+    ("Claude refresh body escapes reserved characters", testClaudeTokenRefreshBodyEscapesReservedCharacters),
     ("auto-start detects pinned/unstarted window", testAutoStartDetectsPinnedWindow),
     ("auto-start ignores an already-ticking window", testAutoStartDoesNotFireOnTickingWindow),
     ("auto-start requires real elapsed time, not just sample count", testAutoStartRequiresMinimumSpanNotJustSampleCount),

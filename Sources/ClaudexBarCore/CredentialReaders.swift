@@ -1,8 +1,18 @@
 import Foundation
 import Security
+import os
 
 public protocol CodexAuthReading: Sendable {
     func readAccessToken() throws -> String
+    /// The ChatGPT account/workspace the token belongs to, if known. Sent as
+    /// `chatgpt-account-id` so users with several workspaces (e.g. personal
+    /// plus Team/Business) see the limits of the account Codex actually uses,
+    /// not whatever the backend picks as default.
+    func readAccountID() -> String?
+}
+
+extension CodexAuthReading {
+    public func readAccountID() -> String? { nil }
 }
 
 public struct CodexAuthReader: CodexAuthReading {
@@ -13,9 +23,7 @@ public struct CodexAuthReader: CodexAuthReading {
     }
 
     public func readAccessToken() throws -> String {
-        guard let data = try? Data(contentsOf: authURL),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = root["tokens"] as? [String: Any],
+        guard let tokens = readTokens(),
               let token = tokens["access_token"] as? String,
               !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
@@ -23,6 +31,19 @@ public struct CodexAuthReader: CodexAuthReading {
         }
 
         return token.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func readAccountID() -> String? {
+        guard let id = readTokens()?["account_id"] as? String else { return nil }
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func readTokens() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: authURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return root["tokens"] as? [String: Any]
     }
 }
 
@@ -133,6 +154,7 @@ public struct ClaudeCredentialReader: ClaudeCredentialReading {
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
+        KeychainDiagnostics.noteReadStatus(status, service: service)
         guard status == errSecSuccess else { return nil }
         return item as? Data
     }
@@ -168,4 +190,21 @@ public func stripBearerPrefix(_ token: String) -> String {
         return String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
     return trimmed
+}
+
+/// Surfaces Keychain read failures that are *not* a plain "item not found".
+///
+/// Callers deliberately fall back to the next credential source when a read
+/// fails, which is right — but previously every failure (access denied by the
+/// item's ACL, keychain locked, corrupt item) was indistinguishable from
+/// "not installed", making real problems invisible. Those now go to the
+/// unified log: `log show --predicate 'subsystem == "com.ipang.claudexbar"'`.
+enum KeychainDiagnostics {
+    private static let logger = os.Logger(subsystem: "com.ipang.claudexbar", category: "keychain")
+
+    static func noteReadStatus(_ status: OSStatus, service: String) {
+        guard status != errSecSuccess, status != errSecItemNotFound else { return }
+        let message = SecCopyErrorMessageString(status, nil) as String? ?? "unknown"
+        logger.error("Keychain read failed for \(service, privacy: .public): \(status) \(message, privacy: .public)")
+    }
 }

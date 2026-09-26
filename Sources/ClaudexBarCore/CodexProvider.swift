@@ -24,6 +24,9 @@ public struct CodexProvider: UsageProvider {
             var request = URLRequest(url: usageURL)
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let accountID = authReader.readAccountID() {
+                request.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
+            }
             request.setValue(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 forHTTPHeaderField: "User-Agent"

@@ -24,6 +24,10 @@ command -v gh >/dev/null 2>&1 || { echo "gh (GitHub CLI) is required: https://cl
 [ -z "$(git status --porcelain)" ] || { echo "Working tree is not clean — commit or stash changes first."; exit 1; }
 
 TAG="v${VERSION}"
+
+# Always target the repo `origin` points at (this fork). Without -R, gh picks
+# the fork's *parent* as the default repo and tries to release there.
+REPO="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
 if git rev-parse "${TAG}" >/dev/null 2>&1; then
   echo "Tag ${TAG} already exists."; exit 1
 fi
@@ -55,17 +59,17 @@ git push origin "${TAG}"
 # Release notes: the matching CHANGELOG section if present, else auto-generated.
 NOTES="$(awk -v v="${VERSION}" '
   $0 ~ ("^## \\[" v "\\]") { grab = 1; next }
-  grab && /^## \[/         { exit }
+  grab && /^## /           { exit }
   grab                     { print }
 ' CHANGELOG.md 2>/dev/null || true)"
 
 if [ -n "$(printf '%s' "${NOTES}" | tr -d '[:space:]')" ]; then
   TMP_NOTES="$(mktemp)"
   printf '%s\n' "${NOTES}" > "${TMP_NOTES}"
-  gh release create "${TAG}" --title "${TAG}" --notes-file "${TMP_NOTES}"
+  gh release create "${TAG}" -R "${REPO}" --title "${TAG}" --notes-file "${TMP_NOTES}"
   rm -f "${TMP_NOTES}"
 else
-  gh release create "${TAG}" --title "${TAG}" --generate-notes
+  gh release create "${TAG}" -R "${REPO}" --title "${TAG}" --generate-notes
 fi
 
 echo "Released ${TAG}"

@@ -74,7 +74,9 @@ public struct ClaudeCredentialStore: Sendable {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        KeychainDiagnostics.noteReadStatus(status, service: Self.service)
+        guard status == errSecSuccess,
               let data = item as? Data else { return nil }
         return ClaudeCredentialReader.decodeCredentials(data: data)
     }
@@ -120,7 +122,7 @@ public final class ClaudeOAuthFlow: @unchecked Sendable {
     private let store: ClaudeCredentialStore
     private let session: URLSession
 
-    public init(store: ClaudeCredentialStore = ClaudeCredentialStore(), session: URLSession = .shared) {
+    public init(store: ClaudeCredentialStore = ClaudeCredentialStore(), session: URLSession = .claudexbar) {
         self.pkce = PKCEChallenge.random()
         self.state = base64URLEncode(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
         self.store = store
@@ -205,7 +207,7 @@ public final class ClaudeOAuthFlow: @unchecked Sendable {
         return ClaudeCredentials(accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
     }
 
-    static func formBody(_ values: [String: String]) -> Data {
+    public static func formBody(_ values: [String: String]) -> Data {
         let body = values.map { "\(urlFormEncode($0))=\(urlFormEncode($1))" }
             .sorted()
             .joined(separator: "&")

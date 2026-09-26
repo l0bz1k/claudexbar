@@ -80,62 +80,25 @@ actor CLIUpdateManager {
     }
 
     private static func version(executable: URL) async -> String? {
-        let result = await runProcess(executable: executable, arguments: ["--version"], captureOutput: true)
-        guard result.exitCode == 0 else { return nil }
-        return CLIVersionParser.semanticVersion(in: result.output)
+        let result = await ProcessRunner.run(executable: executable, arguments: ["--version"], timeout: 30)
+        guard result.succeeded else { return nil }
+        return CLIVersionParser.semanticVersion(in: result.stdout + result.stderr)
     }
 
     private func run(executable: URL, arguments: [String], provider: ProviderID) async -> CLICommandResult {
-        let result = await Self.runProcess(executable: executable, arguments: arguments, captureOutput: false)
-        let outcome = result.exitCode == 0 ? "ok" : "failed exit=\(result.exitCode)"
-        SanitizedLogger.shared.log(provider: provider, message: "cli update \(outcome)")
-        return CLICommandResult(provider: provider, exitCode: result.exitCode)
-    }
-
-    private static func runProcess(
-        executable: URL,
-        arguments: [String],
-        captureOutput: Bool
-    ) async -> (exitCode: Int32, output: String) {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            let output = captureOutput ? Pipe() : nil
-            let error = captureOutput ? Pipe() : nil
-            process.executableURL = executable
-            process.arguments = arguments
-            process.environment = ProcessInfo.processInfo.environment.merging([
-                "PATH": commandPath
-            ]) { _, new in new }
-            process.standardOutput = output ?? FileHandle.nullDevice
-            process.standardError = error ?? FileHandle.nullDevice
-
-            process.terminationHandler = { process in
-                let standardOutput = output?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-                let standardError = error?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-                let text = String(data: standardOutput + standardError, encoding: .utf8) ?? ""
-                continuation.resume(returning: (process.terminationStatus, text))
-            }
-
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(returning: (127, ""))
-            }
+        // A generous but finite ceiling: an update may download a sizeable
+        // binary, but a hung one must not hold `updateInProgress` forever.
+        let result = await ProcessRunner.run(executable: executable, arguments: arguments, timeout: 10 * 60)
+        let outcome: String
+        if result.succeeded {
+            outcome = "ok"
+        } else if result.timedOut {
+            outcome = "failed: timed out"
+        } else {
+            outcome = "failed exit=\(result.exitCode): \(result.diagnosticExcerpt())"
         }
-    }
-
-    private static var commandPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return [
-            "\(home)/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin"
-        ].joined(separator: ":")
+        SanitizedLogger.shared.log(provider: provider, message: "cli update \(outcome)")
+        return CLICommandResult(provider: provider, exitCode: result.timedOut ? 124 : result.exitCode)
     }
 }
 

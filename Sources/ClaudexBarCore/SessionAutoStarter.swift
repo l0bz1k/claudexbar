@@ -62,7 +62,18 @@ public final class SessionAutoStarter {
         resolvePendingConfirmation(&state, window: window, now: now)
 
         if state.circuitBroken {
-            return .skip(reason: .circuitBroken)
+            // `circuitBrokenAt == nil` only happens for state persisted by
+            // v0.2.0, whose breaker counted *failed CLI launches* (network
+            // down, the message never left the Mac) as failed anchors — so
+            // those trips are not trustworthy evidence; clear them.
+            // Otherwise the breaker re-arms itself after a cooling-off period
+            // instead of staying off until the user happens to notice.
+            let trippedAt = state.circuitBrokenAt
+            if trippedAt == nil || now.timeIntervalSince(trippedAt!) >= config.circuitBreakerAutoReset {
+                Self.clearBreaker(&state)
+            } else {
+                return .skip(reason: .circuitBroken)
+            }
         }
 
         let idleReason: AutoStartDecision.SkipReason?
@@ -94,6 +105,12 @@ public final class SessionAutoStarter {
             return .skip(reason: idleReason)
         }
 
+        // Checked after sampling so detection keeps accumulating evidence
+        // during the backoff and can retry the moment it ends.
+        if let retryAt = state.retryNotBefore, now < retryAt {
+            return .skip(reason: .launchBackoff)
+        }
+
         if let last = state.lastAttemptAt, now.timeIntervalSince(last) < config.minIntervalBetweenAttempts {
             return .skip(reason: .cooldown)
         }
@@ -106,9 +123,8 @@ public final class SessionAutoStarter {
         return .start
     }
 
-    /// Call once the anchor message has actually been sent (regardless of
-    /// whether the CLI call itself reported success — a completed call is
-    /// what matters for anchoring; confirmation comes from the next poll).
+    /// Call right before launching the anchor message. Follow it with either
+    /// `recordLaunchSucceeded` or `recordLaunchFailed` once the CLI returns.
     public func recordAttempt(provider: ProviderID, now: Date) {
         var state = store.state(for: provider)
         state.lastAttemptAt = now
@@ -117,18 +133,53 @@ public final class SessionAutoStarter {
         store.setState(state, for: provider)
     }
 
+    /// The CLI accepted the message; whether it actually started the window
+    /// is judged by the next polls (see `resolvePendingConfirmation`).
+    public func recordLaunchSucceeded(provider: ProviderID) {
+        var state = store.state(for: provider)
+        state.consecutiveLaunchFailures = 0
+        state.retryNotBefore = nil
+        store.setState(state, for: provider)
+    }
+
+    /// The CLI failed before the message could count (no network, CLI not
+    /// found, non-zero exit, timeout). That says nothing about whether
+    /// anchoring *works*, so it must not feed the circuit breaker, burn the
+    /// multi-hour cooldown, or count toward the daily cap — the attempt is
+    /// rolled back and retried soon with exponential backoff instead.
+    public func recordLaunchFailed(provider: ProviderID, now: Date) {
+        var state = store.state(for: provider)
+        if let last = state.attemptsInLast24h.last, last == state.lastAttemptAt {
+            state.attemptsInLast24h.removeLast()
+        }
+        state.lastAttemptAt = state.attemptsInLast24h.last
+        state.pendingConfirmationSince = nil
+        state.consecutiveLaunchFailures += 1
+        let exponent = min(state.consecutiveLaunchFailures - 1, 10)
+        let delay = min(config.launchRetryMaxDelay, config.launchRetryBaseDelay * pow(2, Double(exponent)))
+        state.retryNotBefore = now.addingTimeInterval(delay)
+        store.setState(state, for: provider)
+    }
+
     /// Clears history and the circuit breaker. Called when the user toggles
     /// the feature off (so re-enabling later starts clean) or explicitly
     /// resets it from the menu.
     public func resetCircuitBreaker(provider: ProviderID) {
         var state = store.state(for: provider)
+        Self.clearBreaker(&state)
+        state.consecutiveLaunchFailures = 0
+        state.retryNotBefore = nil
+        store.setState(state, for: provider)
+    }
+
+    private static func clearBreaker(_ state: inout AutoStartState) {
         state.circuitBroken = false
+        state.circuitBrokenAt = nil
         state.consecutiveUnconfirmed = 0
         state.samples = []
         state.nilResetStreakStart = nil
         state.nilResetObservationCount = 0
         state.pendingConfirmationSince = nil
-        store.setState(state, for: provider)
     }
 
     public func currentState(provider: ProviderID) -> AutoStartState {
@@ -249,6 +300,7 @@ public final class SessionAutoStarter {
         state.pendingConfirmationSince = nil
         if state.consecutiveUnconfirmed >= config.maxUnconfirmedBeforeCircuitBreak {
             state.circuitBroken = true
+            state.circuitBrokenAt = now
         }
     }
 }
@@ -263,6 +315,11 @@ public struct AutoStartConfig: Sendable {
     public var confirmationGracePeriod: TimeInterval
     public var maxUnconfirmedBeforeCircuitBreak: Int
     public var sampleHistoryLimit: Int
+    /// How long a tripped breaker stays tripped before re-arming by itself.
+    public var circuitBreakerAutoReset: TimeInterval
+    /// Backoff after a failed CLI launch: base, doubling, capped.
+    public var launchRetryBaseDelay: TimeInterval
+    public var launchRetryMaxDelay: TimeInterval
 
     public init(
         minSamples: Int = 3,
@@ -273,7 +330,10 @@ public struct AutoStartConfig: Sendable {
         maxAttemptsPerDay: Int = 5,
         confirmationGracePeriod: TimeInterval = 15 * 60,
         maxUnconfirmedBeforeCircuitBreak: Int = 2,
-        sampleHistoryLimit: Int = 6
+        sampleHistoryLimit: Int = 6,
+        circuitBreakerAutoReset: TimeInterval = 24 * 60 * 60,
+        launchRetryBaseDelay: TimeInterval = 5 * 60,
+        launchRetryMaxDelay: TimeInterval = 60 * 60
     ) {
         self.minSamples = minSamples
         self.minSpan = minSpan
@@ -284,6 +344,9 @@ public struct AutoStartConfig: Sendable {
         self.confirmationGracePeriod = confirmationGracePeriod
         self.maxUnconfirmedBeforeCircuitBreak = maxUnconfirmedBeforeCircuitBreak
         self.sampleHistoryLimit = sampleHistoryLimit
+        self.circuitBreakerAutoReset = circuitBreakerAutoReset
+        self.launchRetryBaseDelay = launchRetryBaseDelay
+        self.launchRetryMaxDelay = launchRetryMaxDelay
     }
 }
 
@@ -299,6 +362,7 @@ public enum AutoStartDecision: Equatable, Sendable {
         case windowAlreadyTicking
         case cooldown
         case dailyCapReached
+        case launchBackoff
     }
 }
 
@@ -324,6 +388,9 @@ public struct AutoStartState: Codable, Equatable, Sendable {
     public var pendingConfirmationSince: Date?
     public var consecutiveUnconfirmed: Int
     public var circuitBroken: Bool
+    public var circuitBrokenAt: Date?
+    public var consecutiveLaunchFailures: Int
+    public var retryNotBefore: Date?
 
     public init(
         samples: [Sample] = [],
@@ -333,7 +400,10 @@ public struct AutoStartState: Codable, Equatable, Sendable {
         attemptsInLast24h: [Date] = [],
         pendingConfirmationSince: Date? = nil,
         consecutiveUnconfirmed: Int = 0,
-        circuitBroken: Bool = false
+        circuitBroken: Bool = false,
+        circuitBrokenAt: Date? = nil,
+        consecutiveLaunchFailures: Int = 0,
+        retryNotBefore: Date? = nil
     ) {
         self.samples = samples
         self.nilResetStreakStart = nilResetStreakStart
@@ -343,6 +413,35 @@ public struct AutoStartState: Codable, Equatable, Sendable {
         self.pendingConfirmationSince = pendingConfirmationSince
         self.consecutiveUnconfirmed = consecutiveUnconfirmed
         self.circuitBroken = circuitBroken
+        self.circuitBrokenAt = circuitBrokenAt
+        self.consecutiveLaunchFailures = consecutiveLaunchFailures
+        self.retryNotBefore = retryNotBefore
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case samples, nilResetStreakStart, nilResetObservationCount, lastAttemptAt,
+             attemptsInLast24h, pendingConfirmationSince, consecutiveUnconfirmed,
+             circuitBroken, circuitBrokenAt, consecutiveLaunchFailures, retryNotBefore
+    }
+
+    /// Tolerant decoding: every field falls back to its default when absent,
+    /// so adding a field in a new version keeps the rest of the persisted
+    /// state (cooldowns, daily cap, breaker) instead of silently wiping it.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            samples: try c.decodeIfPresent([Sample].self, forKey: .samples) ?? [],
+            nilResetStreakStart: try c.decodeIfPresent(Date.self, forKey: .nilResetStreakStart),
+            nilResetObservationCount: try c.decodeIfPresent(Int.self, forKey: .nilResetObservationCount) ?? 0,
+            lastAttemptAt: try c.decodeIfPresent(Date.self, forKey: .lastAttemptAt),
+            attemptsInLast24h: try c.decodeIfPresent([Date].self, forKey: .attemptsInLast24h) ?? [],
+            pendingConfirmationSince: try c.decodeIfPresent(Date.self, forKey: .pendingConfirmationSince),
+            consecutiveUnconfirmed: try c.decodeIfPresent(Int.self, forKey: .consecutiveUnconfirmed) ?? 0,
+            circuitBroken: try c.decodeIfPresent(Bool.self, forKey: .circuitBroken) ?? false,
+            circuitBrokenAt: try c.decodeIfPresent(Date.self, forKey: .circuitBrokenAt),
+            consecutiveLaunchFailures: try c.decodeIfPresent(Int.self, forKey: .consecutiveLaunchFailures) ?? 0,
+            retryNotBefore: try c.decodeIfPresent(Date.self, forKey: .retryNotBefore)
+        )
     }
 }
 

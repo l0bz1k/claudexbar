@@ -51,7 +51,7 @@ public enum CLIVersionParser {
 public struct CLILatestVersionChecker: Sendable {
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = .claudexbar) {
         self.session = session
     }
 
