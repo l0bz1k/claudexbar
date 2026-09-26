@@ -12,7 +12,8 @@ public enum UsageFormatter {
 
         let hours = minutes / 60
         if hours < 24 {
-            return "\(hours)h"
+            let remainderMinutes = minutes % 60
+            return remainderMinutes > 0 ? "\(hours)h\(remainderMinutes)m" : "\(hours)h"
         }
 
         return "\(hours / 24)d"

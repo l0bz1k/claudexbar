@@ -23,10 +23,294 @@ func fixtureData(_ name: String) throws -> Data {
     return try Data(contentsOf: url)
 }
 
+func testAutoStartDetectsPinnedWindow() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, pinTolerance: 10, minIntervalBetweenAttempts: 60 * 60, maxAttemptsPerDay: 2)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let fullWindow: TimeInterval = 5 * 60 * 60
+
+    // Three polls, 3 minutes apart, each reporting resetAt = now + full window
+    // (unstarted: the horizon slides forward in lockstep with wall-clock time).
+    var lastDecision: AutoStartDecision = .skip(reason: .insufficientSamples)
+    for i in 0..<3 {
+        let now = base.addingTimeInterval(TimeInterval(i) * 180)
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(fullWindow)),
+            secondary: nil,
+            fetchedAt: now
+        )
+        lastDecision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+    try expect(lastDecision == .start, "pinned window across 3 samples spanning >4min should trigger start")
+}
+
+func testAutoStartDoesNotFireOnTickingWindow() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, pinTolerance: 10)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    // Started window: resetAt is a FIXED point in time across polls.
+    let fixedResetAt = base.addingTimeInterval(3 * 60 * 60)
+
+    var lastDecision: AutoStartDecision = .start
+    for i in 0..<3 {
+        let now = base.addingTimeInterval(TimeInterval(i) * 180)
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 60, resetAt: fixedResetAt),
+            secondary: nil,
+            fetchedAt: now
+        )
+        lastDecision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+    try expect(lastDecision == .skip(reason: .windowAlreadyTicking), "a resetAt that stays fixed across polls means the window already started")
+}
+
+func testAutoStartRequiresMinimumSpanNotJustSampleCount() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, pinTolerance: 10)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let fullWindow: TimeInterval = 5 * 60 * 60
+
+    // 3 samples, but only 10 seconds apart each — real elapsed time is too
+    // short to trust the "pinned" pattern (could just be rapid re-polling).
+    var lastDecision: AutoStartDecision = .start
+    for i in 0..<3 {
+        let now = base.addingTimeInterval(TimeInterval(i) * 10)
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(fullWindow)),
+            secondary: nil,
+            fetchedAt: now
+        )
+        lastDecision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+    try expect(lastDecision == .skip(reason: .insufficientSpan), "3 samples 10s apart don't span enough real time to trust the pattern")
+}
+
+func testAutoStartRespectsCooldownAndDailyCap() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, pinTolerance: 10, minIntervalBetweenAttempts: 60 * 60, maxAttemptsPerDay: 1)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let fullWindow: TimeInterval = 5 * 60 * 60
+
+    func pin(atOffsetMinutes offsets: [Int], from anchor: Date) -> AutoStartDecision {
+        var decision: AutoStartDecision = .start
+        for m in offsets {
+            let now = anchor.addingTimeInterval(TimeInterval(m) * 60)
+            let snapshot = UsageSnapshot(
+                primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(fullWindow)),
+                secondary: nil,
+                fetchedAt: now
+            )
+            decision = starter.evaluate(provider: .codex, snapshot: snapshot, now: now)
+        }
+        return decision
+    }
+
+    let first = pin(atOffsetMinutes: [0, 3, 6], from: base)
+    try expect(first == .start, "first pinned run should trigger")
+    starter.recordAttempt(provider: .codex, now: base.addingTimeInterval(6 * 60))
+
+    // Immediately after, still pinned: cooldown should block a second attempt.
+    let second = pin(atOffsetMinutes: [7, 10, 13], from: base)
+    try expect(second == .skip(reason: .cooldown), "an attempt within the cooldown window must not fire again")
+}
+
+func testAutoStartCircuitBreaksAfterRepeatedUnconfirmedAttempts() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(
+        minSamples: 3,
+        minSpan: 4 * 60,
+        pinTolerance: 10,
+        minIntervalBetweenAttempts: 1, // effectively no cooldown, to isolate circuit-breaker behavior
+        maxAttemptsPerDay: 10,
+        confirmationGracePeriod: 5 * 60,
+        maxUnconfirmedBeforeCircuitBreak: 2
+    )
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let fullWindow: TimeInterval = 5 * 60 * 60
+
+    func stillPinnedSnapshot(now: Date) -> UsageSnapshot {
+        UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(fullWindow)),
+            secondary: nil,
+            fetchedAt: now
+        )
+    }
+
+    // Round 1: pin detected, attempt recorded, but the window never actually
+    // starts (still pinned) past the confirmation grace period -> failure #1.
+    var t = base
+    for m in [0, 3, 6] {
+        t = base.addingTimeInterval(TimeInterval(m) * 60)
+        _ = starter.evaluate(provider: .claude, snapshot: stillPinnedSnapshot(now: t), now: t)
+    }
+    starter.recordAttempt(provider: .claude, now: t)
+    t = t.addingTimeInterval(20 * 60) // past confirmationGracePeriod, still pinned
+    _ = starter.evaluate(provider: .claude, snapshot: stillPinnedSnapshot(now: t), now: t)
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "one failed anchor should not trip the breaker yet")
+
+    // Round 2: same story again -> failure #2 trips the breaker.
+    for m in 1...3 {
+        t = t.addingTimeInterval(TimeInterval(m) * 3 * 60)
+        _ = starter.evaluate(provider: .claude, snapshot: stillPinnedSnapshot(now: t), now: t)
+    }
+    starter.recordAttempt(provider: .claude, now: t)
+    t = t.addingTimeInterval(20 * 60)
+    let finalDecision = starter.evaluate(provider: .claude, snapshot: stillPinnedSnapshot(now: t), now: t)
+    try expect(starter.currentState(provider: .claude).circuitBroken, "two failed anchors in a row should trip the circuit breaker")
+    try expect(finalDecision == .skip(reason: .circuitBroken), "a tripped breaker must block further evaluation")
+
+    starter.resetCircuitBreaker(provider: .claude)
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "resetCircuitBreaker should clear the tripped state")
+}
+
+func testAutoStartDetectsExplicitNilResetAtSignal() throws {
+    // Reproduces the real captured timeline: Claude reports resets_at as
+    // null (not "now + 5h") for a genuinely fresh, never-used window.
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+    var lastDecision: AutoStartDecision = .skip(reason: .insufficientSamples)
+    for offsetMinutes in [0, 3, 6] {
+        let now = base.addingTimeInterval(TimeInterval(offsetMinutes) * 60)
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil),
+            secondary: nil,
+            fetchedAt: now
+        )
+        lastDecision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+    try expect(lastDecision == .start, "resetAt=nil at 100% remaining, sustained for 3 polls over 6 minutes, must trigger start")
+}
+
+func testAutoStartDoesNotFireOnSingleNilResetBlip() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+    let snapshot = UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil),
+        secondary: nil,
+        fetchedAt: base
+    )
+    let decision = starter.evaluate(provider: .claude, snapshot: snapshot, now: base)
+    try expect(decision != .start, "a single nil-resetAt observation must not fire on its own")
+}
+
+func testAutoStartConfirmsAnchorWhenNilResetBecomesReal() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, confirmationGracePeriod: 15 * 60, maxUnconfirmedBeforeCircuitBreak: 2)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+    for offsetMinutes in [0, 3, 6] {
+        let now = base.addingTimeInterval(TimeInterval(offsetMinutes) * 60)
+        let snapshot = UsageSnapshot(primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil), secondary: nil, fetchedAt: now)
+        _ = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+    let attemptTime = base.addingTimeInterval(6 * 60)
+    starter.recordAttempt(provider: .claude, now: attemptTime)
+
+    // Next poll: the window actually started (real resetAt, usage > 0%).
+    let confirmTime = attemptTime.addingTimeInterval(60)
+    let startedSnapshot = UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 98, resetAt: confirmTime.addingTimeInterval(5 * 60 * 60)),
+        secondary: nil,
+        fetchedAt: confirmTime
+    )
+    _ = starter.evaluate(provider: .claude, snapshot: startedSnapshot, now: confirmTime)
+
+    try expect(starter.currentState(provider: .claude).consecutiveUnconfirmed == 0, "seeing a real resetAt after the nil-signal anchor should confirm success")
+    try expect(!starter.currentState(provider: .claude).circuitBroken, "a confirmed anchor must not trip the breaker")
+}
+
+func testAutoStartHighConfidenceFiresOnSingleObservation() throws {
+    // Simulates a check deliberately scheduled for right after a *known*
+    // resetAt boundary: a single "explicitly unstarted" read should be
+    // enough, no multi-sample wait needed.
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    let snapshot = UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil),
+        secondary: nil,
+        fetchedAt: now
+    )
+    let decision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now, highConfidence: true)
+    try expect(decision == .start, "a high-confidence scheduled check should fire on the very first idle observation")
+}
+
+func testAutoStartHighConfidenceStillRespectsCooldown() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, minIntervalBetweenAttempts: 60 * 60)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    starter.recordAttempt(provider: .claude, now: now)
+
+    let snapshot = UsageSnapshot(primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil), secondary: nil, fetchedAt: now)
+    let decision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now.addingTimeInterval(30), highConfidence: true)
+    try expect(decision == .skip(reason: .cooldown), "high confidence bypasses the sample wait, not the cooldown/safety caps")
+}
+
+func testAutoStartResetsHistoryAcrossAnOrganicWindowResetGap() throws {
+    let store = InMemoryAutoStartStore()
+    let config = AutoStartConfig(minSamples: 3, minSpan: 4 * 60, pinTolerance: 25)
+    let starter = SessionAutoStarter(store: store, config: config)
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let fullWindow: TimeInterval = 5 * 60 * 60
+
+    // Evening: window is actively ticking (fixed resetAt), two observations
+    // close together — mirrors "22:00" and "22:02" from a real session.
+    let tickingResetAt = base.addingTimeInterval(70 * 60) // fixed point in time
+    for offset in [0, 120] {
+        let now = base.addingTimeInterval(TimeInterval(offset))
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 38, resetAt: tickingResetAt),
+            secondary: nil,
+            fetchedAt: now
+        )
+        _ = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+
+    // Mac sleeps for ~6.5 hours. The window naturally resets on its own
+    // partway through (nobody sent a message), so by the time the network
+    // comes back it's freshly unstarted — a different epoch than the two
+    // samples above, which described the old, already-ticking window.
+    let wakeBase = base.addingTimeInterval(6.5 * 60 * 60)
+    var lastDecision: AutoStartDecision = .skip(reason: .insufficientSamples)
+    for offsetSeconds in stride(from: 0, through: 5 * 60, by: 60) {
+        let now = wakeBase.addingTimeInterval(TimeInterval(offsetSeconds))
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(fullWindow)),
+            secondary: nil,
+            fetchedAt: now
+        )
+        lastDecision = starter.evaluate(provider: .claude, snapshot: snapshot, now: now)
+    }
+
+    try expect(
+        lastDecision == .start,
+        "a freshly-unstarted window after wake must not be blocked by stale pre-sleep samples from the window's previous epoch"
+    )
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(4 * 60 * 60), now: now) == "4h", "4 hour label")
+    try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(4 * 60 * 60 + 35 * 60), now: now) == "4h35m", "4h35m label keeps the minute remainder instead of rounding down to 4h")
+    try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(59 * 60), now: now) == "59m", "59 minute label stays under the hour boundary")
+    try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(60 * 60), now: now) == "1h", "exact hour boundary has no dangling '0m'")
+    try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(23 * 60 * 60 + 59 * 60), now: now) == "23h59m", "just under the day boundary keeps the minute remainder")
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(4 * 24 * 60 * 60), now: now) == "4d", "4 day label")
 }
 
@@ -91,6 +375,17 @@ func testCodexUsageResponseParsingSupportsWeeklyOnlyWindow() throws {
 
     let restored = try CodexProvider.parseUsageResponse(try fixtureData("codex_usage"), fetchedAt: now)
     try expect(restored.primary != nil, "Codex 5h window restores when it returns")
+}
+
+func testCodexUsageResponseParsingSupportsGoPlanMonthlyWindow() throws {
+    let data = try fixtureData("codex_usage_go_plan_check")
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let snapshot = try CodexProvider.parseUsageResponse(data, fetchedAt: now)
+
+    try expect(snapshot.primary == nil, "Go plan has no 5h window")
+    let monthly = try expectNonNil(snapshot.secondary, "Go plan monthly window surfaces")
+    try expect(monthly.windowLabel == "30d", "Go plan window label reflects 30-day duration")
+    try expect(monthly.remainingPercent == 43, "Go plan remaining percent (100 - 57)")
 }
 
 func testClaudeUsageResponseParsingUsesSevenDayFallback() throws {
@@ -657,12 +952,24 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("auto-start detects pinned/unstarted window", testAutoStartDetectsPinnedWindow),
+    ("auto-start ignores an already-ticking window", testAutoStartDoesNotFireOnTickingWindow),
+    ("auto-start requires real elapsed time, not just sample count", testAutoStartRequiresMinimumSpanNotJustSampleCount),
+    ("auto-start respects cooldown and daily cap", testAutoStartRespectsCooldownAndDailyCap),
+    ("auto-start circuit-breaks after repeated unconfirmed attempts", testAutoStartCircuitBreaksAfterRepeatedUnconfirmedAttempts),
+    ("auto-start clears stale history across a sleep/organic-reset gap", testAutoStartResetsHistoryAcrossAnOrganicWindowResetGap),
+    ("auto-start detects explicit nil-resetAt signal (real Claude timeline)", testAutoStartDetectsExplicitNilResetAtSignal),
+    ("auto-start does not fire on a single nil-resetAt blip", testAutoStartDoesNotFireOnSingleNilResetBlip),
+    ("auto-start confirms anchor when nil-resetAt becomes real", testAutoStartConfirmsAnchorWhenNilResetBecomesReal),
+    ("auto-start high-confidence fires on a single observation", testAutoStartHighConfidenceFiresOnSingleObservation),
+    ("auto-start high-confidence still respects cooldown", testAutoStartHighConfidenceStillRespectsCooldown),
     ("reset labels use absolute reset dates", testResetLabelsUseAbsoluteResetDates),
     ("countdown changes without new fetch", testCountdownChangesWhenNowChangesWithoutNewFetch),
     ("full window label vs exact partial percent", testFullWindowUsesWindowLabelButPartialShowsExactPercent),
     ("missing window unlimited formatting", testMissingWindowFormatsAsUnlimitedFiveHourWindow),
     ("Codex usage response parsing", testCodexUsageResponseParsing),
     ("Codex weekly-only usage parsing", testCodexUsageResponseParsingSupportsWeeklyOnlyWindow),
+    ("Codex Go-plan monthly window parsing", testCodexUsageResponseParsingSupportsGoPlanMonthlyWindow),
     ("Claude usage response parsing", testClaudeUsageResponseParsingUsesSevenDayFallback),
     ("Claude env OAuth token", testClaudeCredentialReaderAcceptsOAuthEnvironmentToken),
     ("PKCE S256 challenge", testPKCEChallengeMatchesRFC7636Vector),

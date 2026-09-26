@@ -78,4 +78,32 @@ final class AppSettings {
             defaults.set(newValue, forKey: "automaticCLIUpdatesEnabled")
         }
     }
+
+    /// Opt-in, off by default: sends one trivial message through the real
+    /// `claude`/`codex` CLI when that provider's 5-hour (or monthly) window
+    /// looks idle/unstarted, so idle time before your first prompt isn't
+    /// wasted. See SessionAutoStarter for the detection/safety logic.
+    var autoStartClaudeEnabled: Bool {
+        get { defaults.bool(forKey: "autoStartClaudeEnabled") }
+        set { defaults.set(newValue, forKey: "autoStartClaudeEnabled") }
+    }
+
+    var autoStartCodexEnabled: Bool {
+        get { defaults.bool(forKey: "autoStartCodexEnabled") }
+        set { defaults.set(newValue, forKey: "autoStartCodexEnabled") }
+    }
+
+    func autoStartEnabled(for provider: ProviderID) -> Bool {
+        switch provider {
+        case .claude: return autoStartClaudeEnabled
+        case .codex: return autoStartCodexEnabled
+        }
+    }
+
+    func setAutoStartEnabled(_ enabled: Bool, for provider: ProviderID) {
+        switch provider {
+        case .claude: autoStartClaudeEnabled = enabled
+        case .codex: autoStartCodexEnabled = enabled
+        }
+    }
 }

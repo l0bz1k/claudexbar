@@ -1,0 +1,17 @@
+{
+  "user_id": "user-NI49ITGjrQdLi8AE91kmtONQ",
+  "account_id": "",
+  "email": "example@example.com",
+  "plan_type": "go",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 57,
+      "limit_window_seconds": 2592000,
+      "reset_after_seconds": 1992201,
+      "reset_at": 1790626907
+    },
+    "secondary_window": null
+  }
+}

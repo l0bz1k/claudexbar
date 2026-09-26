@@ -36,6 +36,14 @@ final class StatusBarController: NSObject {
     private var cliUpdateInProgress = false
     private var notificationStore = NotificationCycleStore()
     private var lastAuthNotificationAt: [ProviderID: Date] = [:]
+    private let autoStarter = SessionAutoStarter(store: UserDefaultsAutoStartStore())
+    private var autoStartInFlight: Set<ProviderID> = []
+    // Once a window's resetAt is known (it's actively ticking), a one-shot
+    // timer is armed for right after that boundary instead of waiting on the
+    // polling-based idle heuristic to notice after the fact.
+    private var scheduledResetCheckTimers: [ProviderID: Timer] = [:]
+    private var scheduledResetCheckFor: [ProviderID: Date] = [:]
+    private var pendingHighConfidenceCheck: Set<ProviderID> = []
     private var providerSelection: ProviderSelection {
         get {
             ProviderSelection(activeProvider: settings.activeProvider, enabledProviders: settings.enabledProviders)
@@ -206,6 +214,7 @@ final class StatusBarController: NSObject {
                     errors[provider] = nil
                     usageDeltaTracker.record(provider: provider, snapshot: snapshot)
                     logger.log(provider: provider, message: "usage ok")
+                    handleAutoStart(provider: provider, snapshot: snapshot)
                 case .failure(let error):
                     errors[provider] = error
                     logger.log(provider: provider, message: error.sanitizedDescription)
@@ -224,6 +233,80 @@ final class StatusBarController: NSObject {
             return
         }
         refresh(provider: provider, notify: notify)
+    }
+
+    /// Opt-in: when enabled for this provider and its 5-hour/monthly window
+    /// looks idle/unstarted (see SessionAutoStarter), sends one trivial
+    /// message through the real CLI to anchor it early. Off by default;
+    /// every decision and outcome is written to the log.
+    private func handleAutoStart(provider: ProviderID, snapshot: UsageSnapshot) {
+        guard settings.autoStartEnabled(for: provider) else { return }
+
+        if let resetAt = snapshot.primary?.resetAt {
+            scheduleResetCheckIfNeeded(provider: provider, resetAt: resetAt)
+        }
+
+        guard !autoStartInFlight.contains(provider) else { return }
+
+        let highConfidence = pendingHighConfidenceCheck.remove(provider) != nil
+        let decision = autoStarter.evaluate(provider: provider, snapshot: snapshot, now: Date(), highConfidence: highConfidence)
+        guard case .start = decision else {
+            if case .skip(.circuitBroken) = decision {
+                logger.log(provider: provider, message: "auto-start: disabled after repeated failed anchors — toggle off/on to retry")
+            }
+            return
+        }
+
+        autoStartInFlight.insert(provider)
+        autoStarter.recordAttempt(provider: provider, now: Date())
+        logger.log(provider: provider, message: "auto-start: window looks idle, sending anchor message")
+
+        Task { [weak self] in
+            let result = await SessionAutoStartRunner.run(provider: provider)
+            guard let self else { return }
+            await MainActor.run {
+                self.autoStartInFlight.remove(provider)
+                switch result {
+                case .success:
+                    self.logger.log(provider: provider, message: "auto-start: anchor message sent")
+                case .failure(let error):
+                    self.logger.log(provider: provider, message: "auto-start: anchor failed (\(error))")
+                }
+            }
+        }
+    }
+
+    /// Arms a one-shot timer for shortly after a *known* reset boundary, so
+    /// the very first check after the window actually resets happens within
+    /// about a minute instead of waiting for the periodic poll cadence plus
+    /// the multi-sample idle debounce to notice after the fact. Re-arming is
+    /// skipped if a timer for this same boundary is already scheduled.
+    private func scheduleResetCheckIfNeeded(provider: ProviderID, resetAt: Date) {
+        if let already = scheduledResetCheckFor[provider], abs(already.timeIntervalSince(resetAt)) < 5 {
+            return
+        }
+        scheduledResetCheckTimers[provider]?.invalidate()
+        scheduledResetCheckFor[provider] = resetAt
+
+        let fireAt = resetAt.addingTimeInterval(65)
+        let delay = max(1, fireAt.timeIntervalSinceNow)
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.performScheduledResetCheck(provider: provider) }
+        }
+        scheduledResetCheckTimers[provider] = timer
+        logger.log(provider: provider, message: "auto-start: scheduled idle check ~1min after \(resetAt)")
+    }
+
+    /// Fired by the scheduled timer above: an immediate, out-of-cadence
+    /// refresh whose auto-start evaluation is high-confidence (a single idle
+    /// observation is trusted, since this check was deliberately timed to
+    /// land right after a known boundary rather than an arbitrary poll).
+    private func performScheduledResetCheck(provider: ProviderID) {
+        scheduledResetCheckTimers[provider] = nil
+        guard settings.autoStartEnabled(for: provider) else { return }
+        pendingHighConfidenceCheck.insert(provider)
+        refresh(provider: provider, notify: false)
     }
 
     private func updateImage() {
@@ -266,6 +349,7 @@ final class StatusBarController: NSObject {
         menu.addItem(logs)
 
         menu.addItem(toggleItem(title: "Smart Auto Switch", isOn: settings.smartSwitchEnabled, action: #selector(toggleSmartSwitch)))
+        menu.addItem(autoStartMenu())
         menu.addItem(toggleItem(title: "Launch at Login", isOn: LaunchAgentManager.isEnabled(), action: #selector(toggleLaunchAtLogin)))
         menu.addItem(refreshIntervalMenu())
         menu.addItem(notificationMenu())
@@ -360,6 +444,67 @@ final class StatusBarController: NSObject {
         }
         parent.submenu = submenu
         return parent
+    }
+
+    private func autoStartMenu() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Auto-start 5h Session", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        [ProviderID.codex, ProviderID.claude].forEach { provider in
+            let state = autoStarter.currentState(provider: provider)
+            let enabled = settings.autoStartEnabled(for: provider)
+            // The mechanism only ever targets the primary/short window (see
+            // SessionAutoStarter): that's the genuinely time-sensitive one.
+            // Some plans (e.g. Codex on ChatGPT Go) have no such window at
+            // all — only a monthly quota — where "starting it a bit earlier"
+            // saves nothing worth the automated message. Reflect that in the
+            // menu instead of offering a toggle that would silently never fire.
+            let hasPrimaryWindow = snapshots[provider]?.primary != nil
+            let item = NSMenuItem(title: provider.displayName, action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = provider.rawValue
+
+            if !hasPrimaryWindow, errors[provider] == nil {
+                item.title = "\(provider.displayName) (no 5h window on this plan)"
+                item.isEnabled = false
+                item.state = .off
+            } else {
+                item.title = enabled && state.circuitBroken
+                    ? "\(provider.displayName) (paused — repeated failures)"
+                    : provider.displayName
+                item.state = enabled ? .on : .off
+            }
+            submenu.addItem(item)
+        }
+
+        submenu.addItem(.separator())
+        let note = NSMenuItem(
+            title: "Sends one CLI message when idle. Off by default.",
+            action: nil,
+            keyEquivalent: ""
+        )
+        note.isEnabled = false
+        submenu.addItem(note)
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func toggleAutoStart(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let provider = ProviderID(rawValue: raw) else { return }
+        let newValue = !settings.autoStartEnabled(for: provider)
+        settings.setAutoStartEnabled(newValue, for: provider)
+        // Toggling off-then-on is the documented way to clear a tripped
+        // circuit breaker and start detection fresh.
+        autoStarter.resetCircuitBreaker(provider: provider)
+        if !newValue {
+            scheduledResetCheckTimers[provider]?.invalidate()
+            scheduledResetCheckTimers[provider] = nil
+            scheduledResetCheckFor[provider] = nil
+            pendingHighConfidenceCheck.remove(provider)
+        }
+        logger.log(provider: provider, message: "auto-start: \(newValue ? "enabled" : "disabled")")
     }
 
     private func notificationMenu() -> NSMenuItem {

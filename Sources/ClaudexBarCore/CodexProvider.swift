@@ -62,14 +62,32 @@ public struct CodexProvider: UsageProvider {
 
         var fiveHour: CodexUsageResponse.Window?
         var weekly: CodexUsageResponse.Window?
+        var fiveHourLabel = "5h"
+        var weeklyLabel = "1w"
         for window in windows {
             switch window.limitWindowSeconds {
             case 18_000:
                 fiveHour = window
             case 604_800:
                 weekly = window
-            default:
+            case nil:
+                // No duration metadata at all: handled by the legacy
+                // primary/secondary fallback below. Don't let it fall
+                // through to the "unrecognized duration" branch.
                 break
+            default:
+                // Some plans (e.g. ChatGPT Go) report a single window with a
+                // non-standard duration such as a 30-day/monthly cap instead
+                // of the usual 5h/7d pair. Rather than failing to parse,
+                // surface it in the weekly slot with an honest label derived
+                // from the actual duration.
+                if weekly == nil {
+                    weekly = window
+                    weeklyLabel = Self.windowLabel(forSeconds: window.limitWindowSeconds)
+                } else if fiveHour == nil {
+                    fiveHour = window
+                    fiveHourLabel = Self.windowLabel(forSeconds: window.limitWindowSeconds)
+                }
             }
         }
 
@@ -97,10 +115,21 @@ public struct CodexProvider: UsageProvider {
         }
 
         return UsageSnapshot(
-            primary: usageWindow(fiveHour, label: "5h"),
-            secondary: usageWindow(weekly, label: "1w"),
+            primary: usageWindow(fiveHour, label: fiveHourLabel),
+            secondary: usageWindow(weekly, label: weeklyLabel),
             fetchedAt: fetchedAt
         )
+    }
+
+    private static func windowLabel(forSeconds seconds: Int?) -> String {
+        guard let seconds else { return "1w" }
+        if seconds % 86_400 == 0 {
+            return "\(seconds / 86_400)d"
+        }
+        if seconds % 3_600 == 0 {
+            return "\(seconds / 3_600)h"
+        }
+        return "1w"
     }
 }
 
