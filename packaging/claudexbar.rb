@@ -12,7 +12,7 @@
 
 cask "claudexbar" do
   version "0.2.0"
-  sha256 "REPLACE_WITH_RELEASE_SHA256"
+  sha256 "8c40e324db318d7ef0971d1fd8dc9e07a3c6deba6749dbb150d26a07b2f81be5"
 
   url "https://github.com/l0bz1k/claudexbar/releases/download/v#{version}/ClaudexBar.zip"
   name "ClaudexBar"
