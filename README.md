@@ -9,10 +9,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ipangdz/claudexbar/actions/workflows/ci.yml"><img src="https://github.com/ipangdz/claudexbar/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/l0bz1k/claudexbar/actions/workflows/ci.yml"><img src="https://github.com/l0bz1k/claudexbar/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-black" alt="macOS 13+">
 </p>
+
+> **This is a patched fork** of [ipangdz/claudexbar](https://github.com/ipangdz/claudexbar).
+> See [CHANGELOG.md](CHANGELOG.md#020--2026-09-26) for what's different —
+> notably, correct handling of the ChatGPT Go plan's monthly quota window, a
+> transparent tray background instead of an opaque pill, and an opt-in
+> "Auto-start 5h Session" feature. Grab the latest build from
+> [Releases](https://github.com/l0bz1k/claudexbar/releases).
 
 A small native macOS menu-bar app that shows **Codex** and **Claude Code** usage limits at a glance. Zero-config: it reuses your existing CLI login, shows each provider's session (5-hour) and weekly windows, and warns before you run low — no API keys, no browser cookies, no dependencies.
 

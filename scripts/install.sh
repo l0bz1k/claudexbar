@@ -12,7 +12,7 @@ APP_BIN_PATH="${APP_BIN_DIR}/${APP_NAME}"
 LAUNCH_AGENT_DIR="${HOME}/Library/LaunchAgents"
 PLIST_PATH="${LAUNCH_AGENT_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/Library/Logs/${APP_NAME}"
-REPO_URL="https://github.com/ipangdz/claudexbar.git"
+REPO_URL="https://github.com/l0bz1k/claudexbar.git"
 CACHE_DIR="${HOME}/.local/share/claudexbar/src"
 
 # Resolve the project directory. When run from a checkout, build that. When

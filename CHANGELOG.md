@@ -3,6 +3,37 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-09-26
+
+Patched fork ([l0bz1k/claudexbar](https://github.com/l0bz1k/claudexbar)) with
+fixes for issues found running this daily on a ChatGPT Go + Claude Pro setup.
+
+### Fixed
+- Codex: non-standard rate-limit window durations (e.g. the ChatGPT Go plan's
+  30-day/2,592,000s window) no longer throw a decode error ("err" in the
+  tray); the window is shown with a dynamically computed label (e.g. "30d")
+  instead of the hardcoded "5h"/"1w".
+- Countdown labels keep the minute remainder instead of rounding down to
+  whole hours (e.g. "4h35m" instead of "4h").
+- Tray text no longer clips its trailing character on some values (e.g.
+  "3h1m" rendering as "3h1").
+
+### Changed
+- Tray rendering switched to a proper template image: fully transparent
+  background matching every other menu-bar icon (previously an opaque
+  light/dark "pill"), and the provider glyph was removed to save horizontal
+  space. Column widths are now measured from the actual text on every
+  redraw, so the tray is never wider than its content.
+
+### Added
+- Opt-in, per-provider "Auto-start 5h Session" feature: detects an
+  idle/unstarted rate-limit window and anchors it by sending one trivial
+  message through the real `claude`/`codex` CLI (not a raw API call), so
+  idle time before your first prompt of the day isn't wasted. Includes a
+  proactive check scheduled ~1 minute after a window's known reset time,
+  cooldown/daily caps, and a circuit breaker that disables itself after
+  repeated failed anchors. Off by default for both providers.
+
 ## Unreleased
 
 ### Changed
