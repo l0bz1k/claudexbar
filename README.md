@@ -15,13 +15,20 @@
 </p>
 
 > **This is a patched fork** of [ipangdz/claudexbar](https://github.com/ipangdz/claudexbar).
-> See [CHANGELOG.md](CHANGELOG.md#020--2026-09-26) for what's different —
-> notably, correct handling of the ChatGPT Go plan's monthly quota window, a
-> transparent tray background instead of an opaque pill, and an opt-in
-> "Auto-start 5h Session" feature. Grab the latest build from
-> [Releases](https://github.com/l0bz1k/claudexbar/releases).
+> Grab the latest build from [Releases](https://github.com/l0bz1k/claudexbar/releases).
 
 A small native macOS menu-bar app that shows **Codex** and **Claude Code** usage limits at a glance. Zero-config: it reuses your existing CLI login, shows each provider's session (5-hour) and weekly windows, and warns before you run low — no API keys, no browser cookies, no dependencies.
+
+## What's different from upstream
+
+This fork exists to fix a handful of real issues hit running the original daily on a ChatGPT Go + Claude Pro setup:
+
+- **Codex on the ChatGPT Go plan no longer shows `err`.** The Go plan reports a single, non-standard 30-day quota window instead of the usual 5-hour/weekly pair; upstream's parser didn't recognize it and failed to decode. It's now shown correctly, with a dynamically computed label (e.g. `30d`) instead of a hardcoded one.
+- **Countdown labels no longer round down to whole hours.** `4h35m` used to display as `4h` (the minutes were silently dropped once the countdown passed the one-hour mark); it now shows the real remaining time.
+- **Transparent menu-bar icon.** The pill used to paint its own opaque light/dark background — the only icon in the menu bar that didn't blend in like every other one. It's now a proper template image, matching native menu-bar icons, and the tray is only ever as wide as its actual text (no more wasted space, no more clipped trailing characters like `3h1` instead of `3h1m`). The provider glyph was also dropped to reclaim horizontal space.
+- **Opt-in "Auto-start 5h Session".** If a rate-limit window sits idle/unstarted while you're away, this sends one trivial message through the real `claude`/`codex` CLI to start its clock early, so idle time before your first prompt of the day isn't wasted quota. Off by default, per provider, with a cooldown, a daily cap, and a circuit breaker that disables itself after repeated failed attempts until you manually re-enable it.
+
+Full details, including the two real bugs found and fixed along the way, are in [CHANGELOG.md](CHANGELOG.md#020--2026-09-26).
 
 ## Screenshots
 
@@ -43,49 +50,33 @@ A small native macOS menu-bar app that shows **Codex** and **Claude Code** usage
 
 Works on **both Apple Silicon and Intel** Macs (macOS 13+).
 
-### Homebrew (prebuilt)
+1. Download `ClaudexBar.zip` from [Releases](https://github.com/l0bz1k/claudexbar/releases/latest).
+2. Unzip it and move `ClaudexBar.app` to `/Applications` (or `~/Applications`).
+3. Open it. It isn't notarized (no Apple Developer ID), so Gatekeeper will
+   refuse to launch it normally the first time — **right-click the app →
+   Open → Open** to confirm you trust it. You only need to do this once.
+4. Optional: turn on **Launch at Login** from its menu.
 
-```bash
-brew install --cask ipangdz/tap/claudexbar
-```
+To update later, download the new release and repeat steps 1–2 (step 3 is only needed again if you moved or re-downloaded the app).
 
-A universal, prebuilt `.app` — no toolchain required.
-
-### From source (one line)
-
-Builds a native binary for your machine; needs the Xcode Command Line Tools (`xcode-select --install`), which provide `git` and the Swift toolchain.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ipangdz/claudexbar/main/scripts/install.sh | bash
-```
-
-Or from a checkout:
-
-```bash
-git clone https://github.com/ipangdz/claudexbar.git && cd claudexbar
-./scripts/install.sh
-```
-
-Either way, the installer builds the release binary, assembles `~/Applications/ClaudexBar.app` (with its icon), ad-hoc code-signs it, installs `~/.local/bin/claudexbar`, writes a LaunchAgent, and starts it. To update later, just run the one-liner again.
-
-Because it builds from source on your own machine, no Apple Developer account, certificate, or notarization is required. (A prebuilt, notarized `.dmg` would need an Apple Developer ID — a possible future option.) The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/Spotlight rather than the Dock.
-
-## Development
-
-```bash
-swift build
-swift run ClaudexBarTestRunner
-```
-
-`ClaudexBarTestRunner` covers reset-label formatting, live countdown rendering, Codex and Claude response parsing, notification threshold decisions, one-notification-per-window-cycle deduping, and cross-provider hints.
+The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/Spotlight rather than the Dock.
 
 ## Uninstall
 
-```bash
-./scripts/uninstall.sh
-```
+1. Quit ClaudexBar (right-click the menu-bar icon → **Quit**, or select it and press `⌘Q`).
+2. Move `ClaudexBar.app` to the Trash.
+3. If you had turned on **Launch at Login**, remove its LaunchAgent:
+   ```bash
+   launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.ipang.claudexbar.plist 2>/dev/null
+   rm -f ~/Library/LaunchAgents/com.ipang.claudexbar.plist ~/Library/LaunchAgents/com.ipang.claudexbar.cli-updater.plist
+   ```
+4. Optional — remove its settings and logs:
+   ```bash
+   defaults delete com.ipang.claudexbar 2>/dev/null
+   rm -rf ~/Library/Logs/ClaudexBar
+   ```
 
-Uninstall removes the ClaudexBar binary, LaunchAgent, app settings, and logs. It does not touch Codex or Claude Code credentials.
+This does not touch Codex or Claude Code credentials.
 
 ## Usage
 
@@ -140,6 +131,14 @@ The left usage column is the current session window. The right column is the wee
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The project is
 deliberately narrow (Codex + Claude Code only) and dependency-free.
+
+## Credits
+
+All credit for the original design and implementation goes to
+[ipangdz](https://github.com/ipangdz) — this fork exists only to carry a
+handful of fixes and one opt-in feature on top of that work. If you don't
+need those specifically, the [original project](https://github.com/ipangdz/claudexbar)
+is the one to use and support.
 
 ## License
 
