@@ -65,12 +65,14 @@ public struct ClaudeProvider: UsageProvider {
             primary: UsageWindow(
                 windowLabel: "5h",
                 remainingPercent: clampPercent(100 - fiveHour.utilization),
-                resetAt: ISO8601DateFormatter.parseClaudexDate(fiveHour.resetsAt)
+                resetAt: ISO8601DateFormatter.parseClaudexDate(fiveHour.resetsAt),
+                windowDuration: 5 * 60 * 60
             ),
             secondary: UsageWindow(
                 windowLabel: "7d",
                 remainingPercent: sevenDay.map { clampPercent(100 - $0.utilization) } ?? 0,
-                resetAt: ISO8601DateFormatter.parseClaudexDate(sevenDay?.resetsAt)
+                resetAt: ISO8601DateFormatter.parseClaudexDate(sevenDay?.resetsAt),
+                windowDuration: 7 * 24 * 60 * 60
             ),
             fetchedAt: fetchedAt
         )

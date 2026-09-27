@@ -469,6 +469,113 @@ func testClaudeTokenRefreshBodyEscapesReservedCharacters() throws {
     try expect(body == "refresh_token=a%2Bb%26c%3Dd", "+, & and = are escaped in form bodies: \(body)")
 }
 
+// MARK: - v0.3.0: percent mode, pace, window durations, ProcessRunner
+
+func testPercentModeShowsUsedOrRemaining() throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let window = UsageWindow(windowLabel: "5h", remainingPercent: 28, resetAt: now.addingTimeInterval(3600))
+    try expect(UsageFormatter.percentText(for: window) == "28%", "remaining is the default")
+    try expect(UsageFormatter.percentText(for: window, mode: .used) == "72%", "used = 100 - remaining")
+    try expect(UsageFormatter.metricDisplay(for: window, unavailableLabel: "5h", now: now, mode: .used).value == "72%", "tray value follows mode")
+    let full = UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil)
+    try expect(UsageFormatter.metricDisplay(for: full, unavailableLabel: "5h", now: now, mode: .used).value == "0%", "a fresh window reads 0% used")
+    try expect(UsageFormatter.percentText(for: nil, mode: .used) == "∞", "a missing window stays ∞")
+}
+
+func testPaceProjectsExhaustionBeforeReset() throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let duration: TimeInterval = 5 * 3600
+    // 1h into a 5h window, 50% used: 50%/h => the rest lasts 1h, reset is 4h away.
+    let window = UsageWindow(windowLabel: "5h", remainingPercent: 50, resetAt: now.addingTimeInterval(4 * 3600), windowDuration: duration)
+    let pace = try expectNonNil(UsageFormatter.pace(for: window, now: now), "pace is computed")
+    try expect(abs(pace.elapsedFraction - 0.2) < 0.001, "20% of the window elapsed")
+    try expect(abs(pace.projectedExhaustion.timeIntervalSince(now) - 3600) < 1, "runs out in ~1h")
+    try expect(pace.runsOutBeforeReset, "1h to exhaustion < 4h to reset")
+    try expect(UsageFormatter.paceSummary(pace, windowName: "Session", now: now).contains("runs out in ~1h"), "summary explains it")
+}
+
+func testPaceOnTrackAndInsufficientEvidence() throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let duration: TimeInterval = 5 * 3600
+    // 4h in, 50% used: rest lasts 4h, reset is 1h away => fine.
+    let fine = UsageWindow(windowLabel: "5h", remainingPercent: 50, resetAt: now.addingTimeInterval(3600), windowDuration: duration)
+    try expect(UsageFormatter.pace(for: fine, now: now)?.runsOutBeforeReset == false, "slow burn is on pace")
+    // 10 minutes in (3% of window): too early to judge.
+    let early = UsageWindow(windowLabel: "5h", remainingPercent: 70, resetAt: now.addingTimeInterval(duration - 600), windowDuration: duration)
+    try expect(UsageFormatter.pace(for: early, now: now) == nil, "no projection before 10% of the window elapsed")
+    // Barely used.
+    let light = UsageWindow(windowLabel: "5h", remainingPercent: 95, resetAt: now.addingTimeInterval(3600), windowDuration: duration)
+    try expect(UsageFormatter.pace(for: light, now: now) == nil, "no projection under 10% used")
+    // Exhausted, unstarted, or no duration.
+    try expect(UsageFormatter.pace(for: UsageWindow(windowLabel: "5h", remainingPercent: 0, resetAt: now.addingTimeInterval(3600), windowDuration: duration), now: now) == nil, "already exhausted")
+    try expect(UsageFormatter.pace(for: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil, windowDuration: duration), now: now) == nil, "unstarted")
+    try expect(UsageFormatter.pace(for: UsageWindow(windowLabel: "5h", remainingPercent: 50, resetAt: now.addingTimeInterval(3600)), now: now) == nil, "unknown duration")
+}
+
+func testProvidersReportWindowDurations() throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let claude = try ClaudeProvider.parseUsageResponse(try fixtureData("claude_usage"), fetchedAt: now)
+    try expect(claude.primary?.windowDuration == 5 * 3600, "Claude session is 5h")
+    try expect(claude.secondary?.windowDuration == 7 * 24 * 3600, "Claude weekly is 7d")
+    let go = try CodexProvider.parseUsageResponse(try fixtureData("codex_usage_go_plan_check"), fetchedAt: now)
+    try expect(go.secondary?.windowDuration == 2_592_000, "Codex Go window duration comes from limit_window_seconds")
+    let legacy = try CodexProvider.parseUsageResponse(try fixtureData("codex_usage"), fetchedAt: now)
+    try expect(legacy.primary?.windowDuration == 5 * 3600 && legacy.secondary?.windowDuration == 7 * 24 * 3600, "legacy Codex shape falls back to 5h/7d")
+}
+
+func testProcessRunnerCapturesExitCodeAndStreams() throws {
+    let result = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "echo out; echo err >&2; exit 3"], timeout: 10)
+    }
+    try expect(result.exitCode == 3 && !result.succeeded, "exit code is reported: \(result.exitCode)")
+    try expect(result.stdout.contains("out") && result.stderr.contains("err"), "both streams captured")
+    try expect(result.diagnosticExcerpt() == "err", "excerpt prefers stderr: \(result.diagnosticExcerpt())")
+}
+
+func testProcessRunnerDrainsLargeOutputWithoutDeadlock() throws {
+    // ~1 MB on stdout: far beyond the 64 KB pipe buffer. If output weren't
+    // drained while the child runs, this would block until the timeout.
+    let started = Date()
+    let result = runBlocking {
+        await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "yes x | head -c 1048576; echo tail-marker"],
+            timeout: 20,
+            outputLimit: 4096
+        )
+    }
+    try expect(result.succeeded && !result.timedOut, "large output completes: exit \(result.exitCode) timedOut \(result.timedOut)")
+    try expect(Date().timeIntervalSince(started) < 10, "no pipe-buffer stall")
+    try expect(result.stdout.utf8.count <= 4096 && result.stdout.contains("tail-marker"), "only the tail is kept")
+}
+
+func testProcessRunnerTimesOutAndReportsLaunchFailure() throws {
+    let started = Date()
+    let slow = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 0.5)
+    }
+    try expect(slow.timedOut && !slow.succeeded, "a hung child is timed out")
+    try expect(Date().timeIntervalSince(started) < 8, "timeout actually fires")
+
+    let missing = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/nonexistent/claudexbar-test"), arguments: [], timeout: 5)
+    }
+    try expect(missing.launchFailed && !missing.succeeded, "a missing executable is a launch failure, not a hang")
+}
+
+func testProcessRunnerExcerptIsSingleLineAndRedacted() throws {
+    let result = runBlocking {
+        await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo 'line one' >&2; echo 'token sk-ant-api03-SECRETSECRETSECRET' >&2; exit 1"],
+            timeout: 10
+        )
+    }
+    let excerpt = result.diagnosticExcerpt()
+    try expect(!excerpt.contains("\n") && excerpt.contains("line one | token"), "multi-line stderr is joined: \(excerpt)")
+    try expect(!excerpt.contains("SECRETSECRETSECRET"), "secrets are redacted: \(excerpt)")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1118,6 +1225,14 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("percent mode shows used or remaining", testPercentModeShowsUsedOrRemaining),
+    ("pace projects exhaustion before reset", testPaceProjectsExhaustionBeforeReset),
+    ("pace: on track, and no projection without evidence", testPaceOnTrackAndInsufficientEvidence),
+    ("providers report window durations", testProvidersReportWindowDurations),
+    ("ProcessRunner captures exit code and streams", testProcessRunnerCapturesExitCodeAndStreams),
+    ("ProcessRunner drains large output without deadlock", testProcessRunnerDrainsLargeOutputWithoutDeadlock),
+    ("ProcessRunner times out and reports launch failure", testProcessRunnerTimesOutAndReportsLaunchFailure),
+    ("ProcessRunner excerpt is single-line and redacted", testProcessRunnerExcerptIsSingleLineAndRedacted),
     ("auto-start launch failure rolls back and backs off", testAutoStartLaunchFailureRollsBackAndBacksOff),
     ("auto-start launch failures never trip breaker; backoff caps", testAutoStartLaunchFailuresNeverTripBreakerAndBackoffCaps),
     ("auto-start breaker auto-resets after cooling off", testAutoStartBreakerAutoResetsAfterCoolingOff),

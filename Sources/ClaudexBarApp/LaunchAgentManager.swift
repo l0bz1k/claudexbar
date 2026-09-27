@@ -41,18 +41,31 @@ enum LaunchAgentManager {
             withIntermediateDirectories: true
         )
         try? plist.write(to: AppPaths.launchAgent, atomically: true, encoding: .utf8)
-        runLaunchctl(["bootstrap", "gui/\(getuid())", AppPaths.launchAgent.path])
+        // Re-enabling within the same login session: the job is still loaded
+        // (uninstall no longer boots it out), and the plist on disk is all
+        // that's needed for the next login.
+        if !isJobLoaded {
+            runLaunchctl(["bootstrap", "gui/\(getuid())", AppPaths.launchAgent.path])
+        }
     }
 
+    /// Only removes the plist — deliberately no `launchctl bootout`. When the
+    /// app was started at login it *is* this job's process, so booting the job
+    /// out terminated the app the instant "Launch at Login" was unchecked.
+    /// The job has no KeepAlive, so a loaded-but-plistless job never restarts
+    /// on its own, and without the plist it isn't started at the next login.
     private static func uninstall() {
-        runLaunchctl(["bootout", "gui/\(getuid())", AppPaths.launchAgent.path])
         try? FileManager.default.removeItem(at: AppPaths.launchAgent)
     }
 
-    /// Synchronous on purpose: install/uninstall issue bootout then bootstrap
-    /// back-to-back, and bootstrap must not race a bootout still in flight.
-    /// launchctl returns almost instantly, so blocking here is harmless.
-    private static func runLaunchctl(_ arguments: [String]) {
+    private static var isJobLoaded: Bool {
+        runLaunchctl(["print", "gui/\(getuid())/com.ipang.claudexbar"]) == 0
+    }
+
+    /// Synchronous on purpose so callers can act on the exit status; launchctl
+    /// returns almost instantly, so blocking here is harmless.
+    @discardableResult
+    private static func runLaunchctl(_ arguments: [String]) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments
@@ -61,8 +74,9 @@ enum LaunchAgentManager {
         do {
             try process.run()
             process.waitUntilExit()
+            return process.terminationStatus
         } catch {
-            return
+            return -1
         }
     }
 }

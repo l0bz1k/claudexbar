@@ -351,6 +351,7 @@ final class StatusBarController: NSObject {
 
     private func updateImage() {
         guard let button = statusItem.button else { return }
+        button.toolTip = nil
         guard !providerSelection.enabledProviders.isEmpty else {
             button.image = StatusPillRenderer.pausedImage()
             return
@@ -367,11 +368,37 @@ final class StatusBarController: NSObject {
         // snapshot yet, or the error needs the user's attention (auth, parse).
         let error = errors[activeProvider]
         if let snapshot = snapshots[activeProvider], error == nil || error!.isTransient {
-            button.image = StatusPillRenderer.image(provider: activeProvider, snapshot: snapshot)
+            let now = Date()
+            button.image = StatusPillRenderer.image(
+                provider: activeProvider,
+                snapshot: snapshot,
+                now: now,
+                mode: settings.percentMode,
+                paceWarnings: settings.paceWarningEnabled
+            )
+            button.toolTip = tooltip(for: activeProvider, snapshot: snapshot, now: now)
             return
         }
 
         button.image = StatusPillRenderer.image(provider: activeProvider, status: error?.statusLabel ?? "wait")
+    }
+
+    /// Hover text: what each figure means (so remaining vs used can't be
+    /// misread) plus the pace projection behind any ▲ marker.
+    private func tooltip(for provider: ProviderID, snapshot: UsageSnapshot, now: Date) -> String {
+        let side = settings.percentMode == .used ? "used" : "left"
+        var lines = [provider.displayName]
+        let secondaryName = ["7d", "1w"].contains(snapshot.secondary?.windowLabel ?? "") ? "Weekly" : "Quota"
+        for (name, window) in [("Session", snapshot.primary), (secondaryName, snapshot.secondary)] {
+            guard let window else { continue }
+            let percent = settings.percentMode == .used ? window.usedPercent : window.remainingPercent
+            let reset = window.resetAt.map { " · resets in \(UsageFormatter.resetLabel(resetAt: $0, now: now))" } ?? ""
+            lines.append("\(name) (\(window.windowLabel)): \(percent)% \(side)\(reset)")
+            if let pace = UsageFormatter.pace(for: window, now: now) {
+                lines.append("   " + UsageFormatter.paceSummary(pace, windowName: name, now: now))
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func showMenu() {
@@ -390,6 +417,7 @@ final class StatusBarController: NSObject {
 
         menu.addItem(toggleItem(title: "Smart Auto Switch", isOn: settings.smartSwitchEnabled, action: #selector(toggleSmartSwitch)))
         menu.addItem(autoStartMenu())
+        menu.addItem(displayMenu())
         menu.addItem(toggleItem(title: "Launch at Login", isOn: LaunchAgentManager.isEnabled(), action: #selector(toggleLaunchAtLogin)))
         menu.addItem(refreshIntervalMenu())
         menu.addItem(notificationMenu())
@@ -401,6 +429,7 @@ final class StatusBarController: NSObject {
         testNotif.isAlternate = true
         testNotif.keyEquivalentModifierMask = .option
         menu.addItem(testNotif)
+        menu.addItem(NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "", target: self))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q", target: self))
 
@@ -443,7 +472,7 @@ final class StatusBarController: NSObject {
             return override
         }
         if let snapshot = snapshots[provider], errors[provider] == nil {
-            return "\(UsageFormatter.percentText(for: snapshot.primary)) · \(UsageFormatter.percentText(for: snapshot.secondary))"
+            return "\(UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)) · \(UsageFormatter.percentText(for: snapshot.secondary, mode: settings.percentMode))"
         }
         if let error = errors[provider] { return error.statusLabel }
         return "wait"
@@ -799,6 +828,42 @@ final class StatusBarController: NSObject {
         alert.alertStyle = failures.isEmpty ? .informational : .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+
+    private func displayMenu() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.addItem(toggleItem(title: "Show Used % (like Claude / ChatGPT)", isOn: settings.percentMode == .used, action: #selector(togglePercentMode)))
+        submenu.addItem(toggleItem(title: "Pace Warning \(StatusPillRenderer.paceMarker)", isOn: settings.paceWarningEnabled, action: #selector(togglePaceWarning)))
+        submenu.addItem(.separator())
+        let note = NSMenuItem(title: "\(StatusPillRenderer.paceMarker) = at this rate, runs out before reset", action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        submenu.addItem(note)
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func togglePercentMode() {
+        settings.percentMode = settings.percentMode == .used ? .remaining : .used
+        updateImage()
+    }
+
+    @objc private func togglePaceWarning() {
+        settings.paceWarningEnabled.toggle()
+        updateImage()
+    }
+
+    @objc private func copyDiagnostics() {
+        let report = DiagnosticsReport.make(
+            settings: settings,
+            snapshots: snapshots,
+            errors: errors,
+            activeProvider: activeProvider,
+            autoStarter: autoStarter
+        )
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        logger.log(provider: activeProvider, message: "diagnostics copied to clipboard")
     }
 
     @objc private func openLogs() {

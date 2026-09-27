@@ -107,19 +107,20 @@ public struct CodexProvider: UsageProvider {
             throw UsageError.decoding
         }
 
-        func usageWindow(_ window: CodexUsageResponse.Window?, label: String) -> UsageWindow? {
+        func usageWindow(_ window: CodexUsageResponse.Window?, label: String, fallbackDuration: TimeInterval) -> UsageWindow? {
             window.map {
                 UsageWindow(
                     windowLabel: label,
                     remainingPercent: clampPercent(100 - $0.usedPercent),
-                    resetAt: fetchedAt.addingTimeInterval(TimeInterval($0.resetAfterSeconds))
+                    resetAt: fetchedAt.addingTimeInterval(TimeInterval($0.resetAfterSeconds)),
+                    windowDuration: $0.limitWindowSeconds.map(TimeInterval.init) ?? fallbackDuration
                 )
             }
         }
 
         return UsageSnapshot(
-            primary: usageWindow(fiveHour, label: fiveHourLabel),
-            secondary: usageWindow(weekly, label: weeklyLabel),
+            primary: usageWindow(fiveHour, label: fiveHourLabel, fallbackDuration: 5 * 60 * 60),
+            secondary: usageWindow(weekly, label: weeklyLabel, fallbackDuration: 7 * 24 * 60 * 60),
             fetchedAt: fetchedAt
         )
     }

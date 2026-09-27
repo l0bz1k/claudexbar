@@ -93,6 +93,20 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: "autoStartCodexEnabled") }
     }
 
+    /// Remaining (historical default) or used — the latter matches what the
+    /// Claude and ChatGPT apps themselves show.
+    var percentMode: PercentMode {
+        get { PercentMode(rawValue: defaults.string(forKey: "percentMode") ?? "") ?? .remaining }
+        set { defaults.set(newValue.rawValue, forKey: "percentMode") }
+    }
+
+    /// Shows a ▲ next to a window's countdown when, at the current rate, the
+    /// limit would run out before that window resets. On by default.
+    var paceWarningEnabled: Bool {
+        get { defaults.object(forKey: "paceWarningEnabled") == nil ? true : defaults.bool(forKey: "paceWarningEnabled") }
+        set { defaults.set(newValue, forKey: "paceWarningEnabled") }
+    }
+
     func autoStartEnabled(for provider: ProviderID) -> Bool {
         switch provider {
         case .claude: return autoStartClaudeEnabled

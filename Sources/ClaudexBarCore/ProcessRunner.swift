@@ -1,5 +1,4 @@
 import Foundation
-import ClaudexBarCore
 
 /// Runs a subprocess with a hard timeout and continuously drained output.
 ///
@@ -14,19 +13,19 @@ import ClaudexBarCore
 /// Output that arrives after the child exits (from a grandchild that inherited
 /// the pipe) is deliberately ignored rather than awaited: waiting for EOF there
 /// could block indefinitely.
-enum ProcessRunner {
-    struct Result: Sendable {
-        let exitCode: Int32
-        let stdout: String
-        let stderr: String
-        let timedOut: Bool
-        let launchFailed: Bool
+public enum ProcessRunner {
+    public struct Result: Sendable {
+        public let exitCode: Int32
+        public let stdout: String
+        public let stderr: String
+        public let timedOut: Bool
+        public let launchFailed: Bool
 
-        var succeeded: Bool { exitCode == 0 && !timedOut && !launchFailed }
+        public var succeeded: Bool { exitCode == 0 && !timedOut && !launchFailed }
 
         /// A short, single-line, secret-redacted excerpt suitable for the log:
         /// the tail of stderr, or of stdout when stderr is empty.
-        func diagnosticExcerpt(maxLength: Int = 240) -> String {
+        public func diagnosticExcerpt(maxLength: Int = 240) -> String {
             let source = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr
             let oneLine = source
                 .split(whereSeparator: \.isNewline)
@@ -40,7 +39,7 @@ enum ProcessRunner {
 
     /// PATH for CLI subprocesses: the usual install locations first (launchd
     /// hands LaunchAgents a minimal PATH), then whatever we inherited.
-    static var cliEnvironment: [String: String] {
+    public static var cliEnvironment: [String: String] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let preferred = [
             "\(home)/.local/bin",
@@ -58,7 +57,7 @@ enum ProcessRunner {
         return ProcessInfo.processInfo.environment.merging(["PATH": path]) { _, new in new }
     }
 
-    static func run(
+    public static func run(
         executable: URL,
         arguments: [String],
         environment: [String: String]? = nil,

@@ -3,6 +3,33 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-09-27
+
+### Added
+- **Show used % instead of remaining** (Display → Show Used %), matching the
+  Claude and ChatGPT apps, which both show usage consumed.
+- **Pace warning.** A ▲ next to a window's countdown means that at the rate
+  you've been using it, the limit runs out before the window resets. Needs at
+  least 10% of the window elapsed and 10% used before it projects anything,
+  so a single early prompt doesn't trigger it. Toggle under Display.
+- **Hover tooltip** on the menu-bar item: what each number means (left vs
+  used), when each window resets, and the pace projection behind any ▲.
+- **Copy Diagnostics** menu item: versions, settings, each provider's last
+  response and auto-start state, which CLIs were found, and the log tail —
+  secret-redacted and with the home folder shortened to `~`, ready to paste
+  into an issue.
+
+### Fixed
+- **Unchecking "Launch at Login" quit the app** when it had been started at
+  login: it booted out the launchd job the app itself was running under. It
+  now only removes the LaunchAgent plist, which is all that's needed to skip
+  the next login.
+
+### Changed
+- `ProcessRunner` moved into the core library and is now covered by tests
+  (exit codes, timeouts, 1 MB output without pipe stalls, launch failures,
+  redaction). 64 tests total.
+
 ## [0.2.1] — 2026-09-27
 
 Bug-fix release from a full code review of the fork.

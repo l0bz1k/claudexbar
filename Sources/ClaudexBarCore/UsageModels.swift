@@ -56,12 +56,18 @@ public struct UsageWindow: Equatable, Sendable {
     public let windowLabel: String
     public let remainingPercent: Int
     public let resetAt: Date?
+    /// Full length of the window (e.g. 5h, 7d, 30d), when the provider tells
+    /// us. Needed to know how much of the window has *elapsed*, for pace.
+    public let windowDuration: TimeInterval?
 
-    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?) {
+    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil) {
         self.windowLabel = windowLabel
         self.remainingPercent = max(0, min(100, remainingPercent))
         self.resetAt = resetAt
+        self.windowDuration = windowDuration
     }
+
+    public var usedPercent: Int { 100 - remainingPercent }
 }
 
 public enum UsageError: Error, Equatable, Sendable {

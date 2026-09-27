@@ -28,6 +28,9 @@ This fork exists to fix a handful of real issues hit running the original daily 
 - **Transparent menu-bar icon.** The pill used to paint its own opaque light/dark background — the only icon in the menu bar that didn't blend in like every other one. It's now a proper template image, matching native menu-bar icons, and the tray is only ever as wide as its actual text (no more wasted space, no more clipped trailing characters like `3h1` instead of `3h1m`). The provider glyph was also dropped to reclaim horizontal space.
 - **Opt-in "Auto-start 5h Session".** If a rate-limit window sits idle/unstarted while you're away, this sends one trivial message through the real `claude`/`codex` CLI to start its clock early, so idle time before your first prompt of the day isn't wasted quota. Off by default, per provider, with a cooldown, a daily cap, and a circuit breaker that disables itself after repeated failed attempts until you manually re-enable it.
 
+- **Used or remaining %, pace warning, tooltip, diagnostics.** Optionally show *used* % like the Claude/ChatGPT apps; a ▲ marks a window you're on pace to exhaust before it resets; hovering explains every number; **Copy Diagnostics** produces a redacted report for bug reports.
+- **"Launch at Login" no longer quits the app when unchecked**, plus a round of reliability fixes from a code review (no on-disk HTTP cache, timeouts on every CLI call, log rotation, refresh on wake).
+
 Full details, including the two real bugs found and fixed along the way, are in [CHANGELOG.md](CHANGELOG.md#020--2026-09-26).
 
 ## Screenshots
@@ -56,6 +59,8 @@ Works on **both Apple Silicon and Intel** Macs (macOS 13+).
    refuse to launch it normally the first time — **right-click the app →
    Open → Open** to confirm you trust it. You only need to do this once.
 4. Optional: turn on **Launch at Login** from its menu.
+
+**After installing or updating, macOS asks once for Keychain access** ("ClaudexBar wants to use your confidential information…") — click **Always Allow**. Because the app is ad-hoc signed rather than signed with a Developer ID, macOS ties that permission to the exact build, so it asks again after each update. Until you answer, Claude Code usage shows `wait`.
 
 To update later, download the new release and repeat steps 1–2 (step 3 is only needed again if you moved or re-downloaded the app).
 

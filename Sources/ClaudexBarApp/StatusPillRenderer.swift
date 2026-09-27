@@ -27,22 +27,39 @@ enum StatusPillRenderer {
     private static let columnGap: CGFloat = 7
     private static let rightPadding: CGFloat = 4
 
-    static func image(provider: ProviderID, snapshot: UsageSnapshot, now: Date = Date()) -> NSImage {
+    /// Appended to a window's countdown when, at the current rate, the limit
+    /// runs out before that window resets. Template images are single-colour,
+    /// so this has to be a glyph rather than a red/amber tint.
+    static let paceMarker = "▲"
+
+    static func image(
+        provider: ProviderID,
+        snapshot: UsageSnapshot,
+        now: Date = Date(),
+        mode: PercentMode = .remaining,
+        paceWarnings: Bool = false
+    ) -> NSImage {
         let primary = UsageFormatter.metricDisplay(
             for: snapshot.primary,
             unavailableLabel: "5h",
-            now: now
+            now: now,
+            mode: mode
         )
         let secondary = UsageFormatter.metricDisplay(
             for: snapshot.secondary,
             unavailableLabel: provider == .codex ? "1w" : "7d",
-            now: now
+            now: now,
+            mode: mode
         )
+        func label(_ base: String, _ window: UsageWindow?) -> String {
+            guard paceWarnings, UsageFormatter.pace(for: window, now: now)?.runsOutBeforeReset == true else { return base }
+            return "\(base) \(paceMarker)"
+        }
         return image(
             provider: provider,
-            primaryLabel: primary.label,
+            primaryLabel: label(primary.label, snapshot.primary),
             primaryValue: primary.value,
-            secondaryLabel: secondary.label,
+            secondaryLabel: label(secondary.label, snapshot.secondary),
             secondaryValue: secondary.value
         )
     }
