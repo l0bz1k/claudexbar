@@ -53,6 +53,16 @@ enum SessionAutoStartRunner {
             ]
         }
 
+        // Anchors often go out during a brief Power Nap/DarkWake (lid closed,
+        // ~45 s awake). Hold an idle-sleep assertion for the duration of the
+        // CLI call so the Mac doesn't drop back to sleep mid-send; it's bounded
+        // by `processTimeout` and released on every path.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.idleSystemSleepDisabled, .suddenTerminationDisabled],
+            reason: "ClaudexBar is sending a message to start a usage window"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+
         let result = await ProcessRunner.run(
             executable: executable,
             arguments: arguments,

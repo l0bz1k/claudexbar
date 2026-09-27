@@ -3,6 +3,20 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-09-27
+
+### Fixed
+- **Auto-start was late after sleeping through a reset.** With the lid
+  closed the Mac only wakes for ~45 s about once an hour (Power Nap /
+  DarkWake), so the detector's "three observations in a row" rule took three
+  such wakes to fire — about two hours of the new window wasted — and the
+  timer scheduled for just after the reset can't fire during sleep. The end of
+  the last running window is now remembered on disk; once it has passed, the
+  first observation of a fresh window anchors immediately (the old
+  multi-sample rule still applies when no boundary is known).
+- The anchor message now holds an idle-sleep assertion while the CLI runs, so
+  a DarkWake doesn't put the Mac back to sleep mid-send.
+
 ## [0.3.0] — 2026-09-27
 
 ### Added

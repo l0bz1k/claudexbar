@@ -576,6 +576,63 @@ func testProcessRunnerExcerptIsSingleLineAndRedacted() throws {
     try expect(!excerpt.contains("SECRETSECRETSECRET"), "secrets are redacted: \(excerpt)")
 }
 
+// MARK: - v0.3.1: act on the first observation after a known boundary
+
+func testAutoStartActsOnFirstObservationAfterSleepingThroughReset() throws {
+    // Reproduces the night of 2026-09-27: the window ran until 01:40Z, the Mac
+    // slept, and only woke for ~45 s about once an hour.
+    let store = InMemoryAutoStartStore()
+    let starter = SessionAutoStarter(store: store)
+    let reset = Date(timeIntervalSince1970: 1_790_476_800) // the running window's end
+    let evening = reset.addingTimeInterval(-3 * 3600)
+
+    let running = UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 60, resetAt: reset, windowDuration: 5 * 3600),
+        secondary: nil,
+        fetchedAt: evening
+    )
+    _ = starter.evaluate(provider: .claude, snapshot: running, now: evening)
+    try expect(starter.currentState(provider: .claude).lastKnownResetAt == reset, "a running window's end is remembered")
+
+    // First DarkWake two hours after the reset: one observation, fresh window.
+    let dawn = reset.addingTimeInterval(2 * 3600)
+    let decision = starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(dawn), now: dawn)
+    try expect(decision == .start, "the first fresh observation after a passed boundary anchors immediately: \(decision)")
+}
+
+func testAutoStartWithoutPassedBoundaryStillNeedsSeveralSamples() throws {
+    let store = InMemoryAutoStartStore()
+    let starter = SessionAutoStarter(store: store)
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    // No history at all (fresh install): keep the conservative multi-sample rule.
+    try expect(starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(now), now: now) == .skip(reason: .insufficientSamples), "no known boundary -> no shortcut")
+    // A known boundary that is still in the future doesn't count either.
+    store.setState(AutoStartState(lastKnownResetAt: now.addingTimeInterval(3600)), for: .claude)
+    try expect(starter.evaluate(provider: .claude, snapshot: idleClaudeSnapshot(now), now: now) == .skip(reason: .insufficientSamples), "future boundary -> no shortcut")
+}
+
+func testAutoStartSlidingProviderUsesPassedBoundaryButNeverStoresSlidingReset() throws {
+    let store = InMemoryAutoStartStore()
+    let starter = SessionAutoStarter(store: store)
+    let boundary = Date(timeIntervalSince1970: 1_790_000_000)
+    store.setState(AutoStartState(lastKnownResetAt: boundary), for: .codex)
+    let now = boundary.addingTimeInterval(3600)
+    let duration: TimeInterval = 5 * 3600
+    let fresh = UsageSnapshot(
+        primary: UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(duration), windowDuration: duration),
+        secondary: nil,
+        fetchedAt: now
+    )
+    try expect(starter.evaluate(provider: .codex, snapshot: fresh, now: now) == .start, "Codex-style fresh window after a passed boundary anchors at once")
+    try expect(starter.currentState(provider: .codex).lastKnownResetAt == boundary, "a sliding 'now + length' reset is never stored as a boundary")
+}
+
+func testAutoStartStateKeepsLastKnownResetAcrossDecoding() throws {
+    let state = AutoStartState(lastKnownResetAt: Date(timeIntervalSince1970: 1_790_000_000))
+    let decoded = try JSONDecoder().decode(AutoStartState.self, from: try JSONEncoder().encode(state))
+    try expect(decoded.lastKnownResetAt == state.lastKnownResetAt, "boundary survives a relaunch")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1225,6 +1282,10 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("auto-start acts on first observation after sleeping through a reset", testAutoStartActsOnFirstObservationAfterSleepingThroughReset),
+    ("auto-start without a passed boundary still needs several samples", testAutoStartWithoutPassedBoundaryStillNeedsSeveralSamples),
+    ("auto-start sliding provider uses passed boundary, never stores sliding reset", testAutoStartSlidingProviderUsesPassedBoundaryButNeverStoresSlidingReset),
+    ("auto-start state keeps last known reset across decoding", testAutoStartStateKeepsLastKnownResetAcrossDecoding),
     ("percent mode shows used or remaining", testPercentModeShowsUsedOrRemaining),
     ("pace projects exhaustion before reset", testPaceProjectsExhaustionBeforeReset),
     ("pace: on track, and no projection without evidence", testPaceOnTrackAndInsufficientEvidence),

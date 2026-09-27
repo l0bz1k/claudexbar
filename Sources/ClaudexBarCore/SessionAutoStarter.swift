@@ -76,11 +76,20 @@ public final class SessionAutoStarter {
             }
         }
 
+        // A known reset boundary that has already passed makes a fresh-looking
+        // window a certainty rather than a hunch: the old window is over, and
+        // nothing has started the new one. That's the situation after the Mac
+        // slept through a reset and wakes only briefly (Power Nap/DarkWake
+        // roughly once an hour) — too rarely to collect several samples in a
+        // row, and the scheduled post-reset timer doesn't fire during sleep.
+        // Remembering the boundary on disk lets the *first* observation act.
+        let boundaryPassed = state.lastKnownResetAt.map { $0 <= now } ?? false
+
         let idleReason: AutoStartDecision.SkipReason?
         switch classify(window) {
         case .explicitlyUnstarted:
             state.samples = []
-            if highConfidence {
+            if highConfidence || boundaryPassed {
                 state.nilResetStreakStart = nil
                 state.nilResetObservationCount = 0
                 idleReason = nil
@@ -90,7 +99,22 @@ public final class SessionAutoStarter {
         case .active(let resetAt):
             state.nilResetStreakStart = nil
             state.nilResetObservationCount = 0
-            idleReason = recordSlidingSample(&state, resetAt: resetAt, now: now)
+            let freshSliding = isFreshSlidingWindow(window, resetAt: resetAt, now: now)
+            if freshSliding, boundaryPassed || highConfidence {
+                // Sliding-shape providers (Codex) report "now + full length"
+                // for an unused window; right after a known boundary that is
+                // just as conclusive as Claude's explicit null.
+                state.samples = []
+                idleReason = nil
+            } else {
+                if !freshSliding {
+                    // A fixed, genuinely running window: remember when it
+                    // ends. (A sliding value is never stored — it would keep
+                    // moving the boundary into the future.)
+                    state.lastKnownResetAt = resetAt
+                }
+                idleReason = recordSlidingSample(&state, resetAt: resetAt, now: now)
+            }
         case .ambiguous:
             // resetAt is nil but utilization isn't ~0 — an unexpected shape
             // (e.g. a transient partial response). Don't guess; just don't
@@ -192,6 +216,14 @@ public final class SessionAutoStarter {
         case explicitlyUnstarted
         case active(resetAt: Date)
         case ambiguous
+    }
+
+    /// An unused window from a provider that reports "now + full length"
+    /// instead of null (Codex): nothing consumed, and the reported reset sits
+    /// a full window-length from now.
+    private func isFreshSlidingWindow(_ window: UsageWindow, resetAt: Date, now: Date) -> Bool {
+        guard window.remainingPercent >= 100, let duration = window.windowDuration else { return false }
+        return abs(resetAt.timeIntervalSince(now) - duration) <= config.pinTolerance * 2
     }
 
     private func classify(_ window: UsageWindow) -> WindowSignal {
@@ -391,6 +423,9 @@ public struct AutoStartState: Codable, Equatable, Sendable {
     public var circuitBrokenAt: Date?
     public var consecutiveLaunchFailures: Int
     public var retryNotBefore: Date?
+    /// End of the last window seen actually running. Once it's in the past,
+    /// a fresh-looking window is known to be idle (see `evaluate`).
+    public var lastKnownResetAt: Date?
 
     public init(
         samples: [Sample] = [],
@@ -403,7 +438,8 @@ public struct AutoStartState: Codable, Equatable, Sendable {
         circuitBroken: Bool = false,
         circuitBrokenAt: Date? = nil,
         consecutiveLaunchFailures: Int = 0,
-        retryNotBefore: Date? = nil
+        retryNotBefore: Date? = nil,
+        lastKnownResetAt: Date? = nil
     ) {
         self.samples = samples
         self.nilResetStreakStart = nilResetStreakStart
@@ -416,12 +452,14 @@ public struct AutoStartState: Codable, Equatable, Sendable {
         self.circuitBrokenAt = circuitBrokenAt
         self.consecutiveLaunchFailures = consecutiveLaunchFailures
         self.retryNotBefore = retryNotBefore
+        self.lastKnownResetAt = lastKnownResetAt
     }
 
     private enum CodingKeys: String, CodingKey {
         case samples, nilResetStreakStart, nilResetObservationCount, lastAttemptAt,
              attemptsInLast24h, pendingConfirmationSince, consecutiveUnconfirmed,
-             circuitBroken, circuitBrokenAt, consecutiveLaunchFailures, retryNotBefore
+             circuitBroken, circuitBrokenAt, consecutiveLaunchFailures, retryNotBefore,
+             lastKnownResetAt
     }
 
     /// Tolerant decoding: every field falls back to its default when absent,
@@ -440,7 +478,8 @@ public struct AutoStartState: Codable, Equatable, Sendable {
             circuitBroken: try c.decodeIfPresent(Bool.self, forKey: .circuitBroken) ?? false,
             circuitBrokenAt: try c.decodeIfPresent(Date.self, forKey: .circuitBrokenAt),
             consecutiveLaunchFailures: try c.decodeIfPresent(Int.self, forKey: .consecutiveLaunchFailures) ?? 0,
-            retryNotBefore: try c.decodeIfPresent(Date.self, forKey: .retryNotBefore)
+            retryNotBefore: try c.decodeIfPresent(Date.self, forKey: .retryNotBefore),
+            lastKnownResetAt: try c.decodeIfPresent(Date.self, forKey: .lastKnownResetAt)
         )
     }
 }
