@@ -100,11 +100,27 @@ final class AppSettings {
         set { defaults.set(newValue.rawValue, forKey: "percentMode") }
     }
 
-    /// Shows a ▲ next to a window's countdown when, at the current rate, the
-    /// limit would run out before that window resets. On by default.
-    var paceWarningEnabled: Bool {
-        get { defaults.object(forKey: "paceWarningEnabled") == nil ? true : defaults.bool(forKey: "paceWarningEnabled") }
-        set { defaults.set(newValue, forKey: "paceWarningEnabled") }
+    /// Pace warning (▲ next to a window's countdown when, at the current rate,
+    /// the limit runs out before that window resets), per window, since they
+    /// matter to different people: the short session window, and the long one
+    /// (weekly for Claude, monthly on the Codex Go plan). Both default to the
+    /// single 0.3.0 setting, which itself defaulted to on.
+    var paceWarningSession: Bool {
+        get { bool(forKey: "paceWarningSession", fallback: legacyPaceWarning) }
+        set { defaults.set(newValue, forKey: "paceWarningSession") }
+    }
+
+    var paceWarningLong: Bool {
+        get { bool(forKey: "paceWarningLong", fallback: legacyPaceWarning) }
+        set { defaults.set(newValue, forKey: "paceWarningLong") }
+    }
+
+    private var legacyPaceWarning: Bool {
+        bool(forKey: "paceWarningEnabled", fallback: true)
+    }
+
+    private func bool(forKey key: String, fallback: Bool) -> Bool {
+        defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
     }
 
     func autoStartEnabled(for provider: ProviderID) -> Bool {

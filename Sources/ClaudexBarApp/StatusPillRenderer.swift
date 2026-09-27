@@ -37,7 +37,8 @@ enum StatusPillRenderer {
         snapshot: UsageSnapshot,
         now: Date = Date(),
         mode: PercentMode = .remaining,
-        paceWarnings: Bool = false
+        sessionPaceWarning: Bool = false,
+        longPaceWarning: Bool = false
     ) -> NSImage {
         let primary = UsageFormatter.metricDisplay(
             for: snapshot.primary,
@@ -51,15 +52,15 @@ enum StatusPillRenderer {
             now: now,
             mode: mode
         )
-        func label(_ base: String, _ window: UsageWindow?) -> String {
-            guard paceWarnings, UsageFormatter.pace(for: window, now: now)?.runsOutBeforeReset == true else { return base }
+        func label(_ base: String, _ window: UsageWindow?, enabled: Bool) -> String {
+            guard enabled, UsageFormatter.pace(for: window, now: now)?.runsOutBeforeReset == true else { return base }
             return "\(base) \(paceMarker)"
         }
         return image(
             provider: provider,
-            primaryLabel: label(primary.label, snapshot.primary),
+            primaryLabel: label(primary.label, snapshot.primary, enabled: sessionPaceWarning),
             primaryValue: primary.value,
-            secondaryLabel: label(secondary.label, snapshot.secondary),
+            secondaryLabel: label(secondary.label, snapshot.secondary, enabled: longPaceWarning),
             secondaryValue: secondary.value
         )
     }

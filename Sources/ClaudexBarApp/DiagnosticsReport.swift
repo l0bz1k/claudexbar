@@ -37,7 +37,7 @@ enum DiagnosticsReport {
         lines.append("")
         lines.append("## Settings")
         lines.append("enabled: \(settings.enabledProviders.map(\.rawValue).sorted().joined(separator: ", ")); active: \(activeProvider.rawValue)")
-        lines.append("refresh: \(Int(settings.refreshInterval))s; percent: \(settings.percentMode.rawValue); pace warning: \(settings.paceWarningEnabled); smart switch: \(settings.smartSwitchEnabled)")
+        lines.append("refresh: \(Int(settings.refreshInterval))s; percent: \(settings.percentMode.rawValue); pace warning session/long: \(settings.paceWarningSession)/\(settings.paceWarningLong); smart switch: \(settings.smartSwitchEnabled)")
         lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled)")
 
         for provider in [ProviderID.claude, .codex] {

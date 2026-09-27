@@ -374,7 +374,8 @@ final class StatusBarController: NSObject {
                 snapshot: snapshot,
                 now: now,
                 mode: settings.percentMode,
-                paceWarnings: settings.paceWarningEnabled
+                sessionPaceWarning: settings.paceWarningSession,
+                longPaceWarning: settings.paceWarningLong
             )
             button.toolTip = tooltip(for: activeProvider, snapshot: snapshot, now: now)
             return
@@ -834,7 +835,8 @@ final class StatusBarController: NSObject {
         let parent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         submenu.addItem(toggleItem(title: "Show Used % (like Claude / ChatGPT)", isOn: settings.percentMode == .used, action: #selector(togglePercentMode)))
-        submenu.addItem(toggleItem(title: "Pace Warning \(StatusPillRenderer.paceMarker)", isOn: settings.paceWarningEnabled, action: #selector(togglePaceWarning)))
+        submenu.addItem(toggleItem(title: "Pace Warning \(StatusPillRenderer.paceMarker): Session (5h)", isOn: settings.paceWarningSession, action: #selector(toggleSessionPaceWarning)))
+        submenu.addItem(toggleItem(title: "Pace Warning \(StatusPillRenderer.paceMarker): Weekly / Monthly", isOn: settings.paceWarningLong, action: #selector(toggleLongPaceWarning)))
         submenu.addItem(.separator())
         let note = NSMenuItem(title: "\(StatusPillRenderer.paceMarker) = at this rate, runs out before reset", action: nil, keyEquivalent: "")
         note.isEnabled = false
@@ -848,8 +850,13 @@ final class StatusBarController: NSObject {
         updateImage()
     }
 
-    @objc private func togglePaceWarning() {
-        settings.paceWarningEnabled.toggle()
+    @objc private func toggleSessionPaceWarning() {
+        settings.paceWarningSession.toggle()
+        updateImage()
+    }
+
+    @objc private func toggleLongPaceWarning() {
+        settings.paceWarningLong.toggle()
         updateImage()
     }
 

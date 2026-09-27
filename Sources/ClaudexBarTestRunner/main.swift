@@ -633,6 +633,30 @@ func testAutoStartStateKeepsLastKnownResetAcrossDecoding() throws {
     try expect(decoded.lastKnownResetAt == state.lastKnownResetAt, "boundary survives a relaunch")
 }
 
+// MARK: - v0.3.2: a started window at 100% shows its countdown
+
+func testFullButStartedWindowShowsCountdown() throws {
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    let duration: TimeInterval = 5 * 3600
+    // An anchor rounded to 0% used, clock running: 4h51m to go.
+    let anchored = UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(4 * 3600 + 51 * 60), windowDuration: duration)
+    let shown = UsageFormatter.display(for: anchored, now: now)
+    try expect(shown.label == "4h51m" && shown.remainingPercent == 100, "started window shows its countdown: \(shown.label)")
+}
+
+func testUnstartedWindowShapesStillShowWindowName() throws {
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    let duration: TimeInterval = 5 * 3600
+    let claudeIdle = UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: nil, windowDuration: duration)
+    try expect(UsageFormatter.display(for: claudeIdle, now: now).label == "5h", "Claude idle (null reset) shows the window name")
+    let codexIdle = UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(duration - 30), windowDuration: duration)
+    try expect(UsageFormatter.display(for: codexIdle, now: now).label == "5h", "Codex idle (reset = now + length) shows the window name")
+    let unknownLength = UsageWindow(windowLabel: "5h", remainingPercent: 100, resetAt: now.addingTimeInterval(3600))
+    try expect(UsageFormatter.display(for: unknownLength, now: now).label == "5h", "unknown duration keeps the old behaviour")
+    let partial = UsageWindow(windowLabel: "5h", remainingPercent: 99, resetAt: now.addingTimeInterval(3600), windowDuration: duration)
+    try expect(UsageFormatter.display(for: partial, now: now).label == "1h", "partial usage still shows the countdown")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1282,6 +1306,8 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("full but started window shows countdown", testFullButStartedWindowShowsCountdown),
+    ("unstarted window shapes still show window name", testUnstartedWindowShapesStillShowWindowName),
     ("auto-start acts on first observation after sleeping through a reset", testAutoStartActsOnFirstObservationAfterSleepingThroughReset),
     ("auto-start without a passed boundary still needs several samples", testAutoStartWithoutPassedBoundaryStillNeedsSeveralSamples),
     ("auto-start sliding provider uses passed boundary, never stores sliding reset", testAutoStartSlidingProviderUsesPassedBoundaryButNeverStoresSlidingReset),

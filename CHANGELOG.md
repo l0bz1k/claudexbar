@@ -3,6 +3,20 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-09-27
+
+### Changed
+- **Pace warning can be toggled per window**: Display → "Pace Warning ▲:
+  Session (5h)" and "Pace Warning ▲: Weekly / Monthly". Both start from the
+  previous single setting, so nothing changes until you flip one.
+
+### Fixed
+- **A started window at 100% looked unstarted.** A tiny first message (such
+  as the auto-start anchor) rounds to 0% used, and the tray then showed "5h /
+  100%" — identical to an idle window — even though the clock was running.
+  A full window now shows its countdown once it has started; idle windows
+  (Claude's null reset, Codex's "now + full length") still show "5h".
+
 ## [0.3.1] — 2026-09-27
 
 ### Fixed

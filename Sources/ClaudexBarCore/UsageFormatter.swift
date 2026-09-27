@@ -41,15 +41,29 @@ public enum UsageFormatter {
     }
 
     public static func display(for window: UsageWindow, now: Date = Date()) -> WindowDisplay {
-        // Only a genuinely full window shows the window label and 100%; any
-        // real usage (e.g. 99% remaining) is shown precisely so a refresh
-        // visibly reflects it.
-        if window.remainingPercent >= 100 {
+        // A full window that hasn't started shows its name ("5h") and 100%.
+        // But "100% left" alone doesn't mean unstarted: a tiny first message
+        // (e.g. an auto-start anchor) rounds to 0% used while the clock is
+        // already running — so once it has started, show the countdown.
+        if window.remainingPercent >= 100, !hasStarted(window, now: now) {
             return WindowDisplay(label: window.windowLabel, remainingPercent: 100)
         }
 
         let label = resetLabel(resetAt: window.resetAt, now: now, fallback: window.windowLabel)
         return WindowDisplay(label: label, remainingPercent: window.remainingPercent)
+    }
+
+    /// Slack for providers that round reset times, so a window that started
+    /// seconds ago isn't mistaken for the "reset = now + full length" shape.
+    static let startedWindowTolerance: TimeInterval = 120
+
+    /// Whether a window's clock is running. No reset time (Claude's idle
+    /// shape) or a reset a full window-length away (Codex's idle shape) means
+    /// not started; with an unknown duration we can't tell, so assume not —
+    /// that keeps the long-standing "5h / 100%" look for full windows.
+    static func hasStarted(_ window: UsageWindow, now: Date) -> Bool {
+        guard let resetAt = window.resetAt, let duration = window.windowDuration else { return false }
+        return resetAt.timeIntervalSince(now) < duration - startedWindowTolerance
     }
 
     public static func metricDisplay(
