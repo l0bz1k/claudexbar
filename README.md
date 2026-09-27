@@ -37,6 +37,7 @@ Full details, including the two real bugs found and fixed along the way, are in 
 
 <p align="center">
   <img src="assets/Screenshot.png" width="640" alt="ClaudexBar"><br>
+  <img src="assets/Screenshot2.png" width="640" alt="ClaudexBar"><br>
   <em>Codex &amp; Claude Code usage right in the menu bar — right-click for the menu, hold ⌥ Option for re-auth.</em>
 </p>
 
