@@ -3,6 +3,22 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] — 2026-10-28
+
+### Fixed
+- **Stuck on "auth" after re-logging into Claude Code.** ClaudexBar always
+  preferred its own stored session, and when that session's refresh token was
+  rejected it never looked at Claude Code's login — so `claude login` didn't
+  help. All credential sources are now tried in order; a definitively rejected
+  own session (HTTP 400/401 on refresh) is discarded so it stops shadowing a
+  valid Claude Code login.
+- **ClaudexBar no longer refreshes Claude Code's token.** Claude rotates the
+  refresh token on every refresh, so refreshing Claude Code's credential (and
+  keeping the rotated result) silently invalidated the copy Claude Code holds,
+  leaving both apps sharing one session. Claude Code's token is now used
+  read-only while it's valid; only ClaudexBar's own session (Re-authenticate
+  in the menu) is ever refreshed.
+
 ## [0.3.2] — 2026-09-27
 
 ### Changed

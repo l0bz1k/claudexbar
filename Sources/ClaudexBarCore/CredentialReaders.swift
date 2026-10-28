@@ -59,8 +59,47 @@ public struct ClaudeCredentials: Equatable, Sendable {
     }
 }
 
+/// Where a Claude credential came from — which decides what ClaudexBar may do
+/// with it.
+public enum ClaudeCredentialSource: String, Sendable {
+    case environment
+    /// ClaudexBar's own OAuth session ("Re-authenticate" in the menu).
+    case claudexbar
+    /// Claude Code's login (its Keychain item or ~/.claude/.credentials.json).
+    case claudeCode
+
+    /// Only ClaudexBar's own session may be refreshed. Claude rotates the
+    /// refresh token on every refresh, so refreshing Claude Code's credential
+    /// would silently invalidate the copy Claude Code still holds — two apps
+    /// sharing one session, each knocking the other out.
+    public var mayRefresh: Bool { self == .claudexbar }
+}
+
+public struct ClaudeCredentialCandidate: Sendable {
+    public let credentials: ClaudeCredentials
+    public let source: ClaudeCredentialSource
+
+    public init(credentials: ClaudeCredentials, source: ClaudeCredentialSource) {
+        self.credentials = credentials
+        self.source = source
+    }
+}
+
 public protocol ClaudeCredentialReading: Sendable {
     func readCredentials() throws -> ClaudeCredentials
+    /// Every usable credential, most preferred first.
+    func credentialCandidates() -> [ClaudeCredentialCandidate]
+    /// Drop ClaudexBar's own session after the server definitively rejected
+    /// its refresh token, so it stops shadowing a valid Claude Code login.
+    func discardOwnedCredentials()
+}
+
+extension ClaudeCredentialReading {
+    public func credentialCandidates() -> [ClaudeCredentialCandidate] {
+        (try? readCredentials()).map { [ClaudeCredentialCandidate(credentials: $0, source: .claudexbar)] } ?? []
+    }
+
+    public func discardOwnedCredentials() {}
 }
 
 public struct ClaudeCredentialReader: ClaudeCredentialReading {
@@ -82,30 +121,38 @@ public struct ClaudeCredentialReader: ClaudeCredentialReading {
     }
 
     public func readCredentials() throws -> ClaudeCredentials {
-        // Explicit override wins for power users.
+        guard let first = credentialCandidates().first else { throw UsageError.missingAuth }
+        return first.credentials
+    }
+
+    /// Explicit override first, then ClaudexBar's own session, then Claude
+    /// Code's login. All of them are returned (not just the first) so a dead
+    /// own session can't hide a perfectly good, freshly renewed Claude Code
+    /// login — the situation after `claude login` that previously left the
+    /// app stuck on "auth".
+    public func credentialCandidates() -> [ClaudeCredentialCandidate] {
+        var candidates: [ClaudeCredentialCandidate] = []
         if let credentials = try? Self.credentialsFromEnvironment(environment) {
-            return credentials
+            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .environment))
         }
-
-        // ClaudexBar's own OAuth credential (full scopes, with refresh token).
         if let credentials = credentialStore.load() {
-            return credentials
+            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudexbar))
         }
-
-        // Fall back to Claude Code's own login if present and still valid.
         for service in keychainServices {
             if let data = keychainData(service: service),
                let credentials = Self.decodeCredentials(data: data) {
-                return credentials
+                candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudeCode))
             }
         }
-
         if let data = try? Data(contentsOf: fallbackURL),
            let credentials = Self.decodeCredentials(data: data) {
-            return credentials
+            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudeCode))
         }
+        return candidates
+    }
 
-        throw UsageError.missingAuth
+    public func discardOwnedCredentials() {
+        credentialStore.clear()
     }
 
     public static func credentialsFromEnvironment(_ environment: [String: String]) throws -> ClaudeCredentials {

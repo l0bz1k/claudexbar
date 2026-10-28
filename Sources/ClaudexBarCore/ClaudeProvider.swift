@@ -28,11 +28,36 @@ public struct ClaudeProvider: UsageProvider {
     }
 
     public func fetchUsage() async -> Result<UsageSnapshot, UsageError> {
+        let candidates = credentialReader.credentialCandidates()
+        guard !candidates.isEmpty else { return .failure(.missingAuth) }
+
+        // Try each credential in order. Only an *auth* failure moves on to the
+        // next one; network, rate-limit and server errors are about the
+        // service, and another credential wouldn't fare better.
+        var lastError = UsageError.missingAuth
+        for candidate in candidates {
+            let result = await fetchUsage(with: candidate)
+            guard case .failure(let error) = result else { return result }
+            lastError = error
+            switch error {
+            case .missingAuth, .authExpired, .refreshFailed:
+                continue
+            default:
+                return result
+            }
+        }
+        return .failure(lastError)
+    }
+
+    private func fetchUsage(with candidate: ClaudeCredentialCandidate) async -> Result<UsageSnapshot, UsageError> {
+        let credentials = candidate.credentials
+        let mayRefresh = candidate.source.mayRefresh
         do {
-            let credentials = try credentialReader.readCredentials()
             let accessToken: String
             if Self.isExpired(credentials.expiresAt, now: now()) {
-                guard let refreshToken = credentials.refreshToken else {
+                // Someone else's expired credential is left alone: Claude Code
+                // refreshes its own token the next time it runs.
+                guard mayRefresh, let refreshToken = credentials.refreshToken else {
                     return .failure(.authExpired)
                 }
                 accessToken = try await refreshAccessToken(refreshToken)
@@ -40,7 +65,7 @@ public struct ClaudeProvider: UsageProvider {
                 accessToken = credentials.accessToken
             }
 
-            return try await fetchUsage(accessToken: accessToken, refreshToken: credentials.refreshToken)
+            return try await fetchUsage(accessToken: accessToken, refreshToken: mayRefresh ? credentials.refreshToken : nil)
         } catch let error as UsageError {
             return .failure(error)
         } catch is DecodingError {
@@ -125,6 +150,12 @@ public struct ClaudeProvider: UsageProvider {
 
         let response = try await httpClient.data(for: request)
         guard (200..<300).contains(response.statusCode) else {
+            // 400 (invalid_grant) / 401: the server rejected this refresh
+            // token for good. Drop the dead own session so it stops shadowing
+            // Claude Code's login; transient 5xx/429 leave it in place.
+            if response.statusCode == 400 || response.statusCode == 401 {
+                credentialReader.discardOwnedCredentials()
+            }
             throw UsageError.refreshFailed
         }
         guard let refreshed = Self.parseRefreshResponse(response.data, fallbackRefreshToken: refreshToken, now: now()) else {

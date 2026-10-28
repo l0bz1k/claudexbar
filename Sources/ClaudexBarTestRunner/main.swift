@@ -657,6 +657,119 @@ func testUnstartedWindowShapesStillShowWindowName() throws {
     try expect(UsageFormatter.display(for: partial, now: now).label == "1h", "partial usage still shows the countdown")
 }
 
+// MARK: - v0.3.3: Claude credential sources
+
+private final class StubClaudeReader: ClaudeCredentialReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var candidates: [ClaudeCredentialCandidate]
+    private(set) var discardCount = 0
+
+    init(_ candidates: [ClaudeCredentialCandidate]) { self.candidates = candidates }
+
+    func readCredentials() throws -> ClaudeCredentials {
+        guard let first = credentialCandidates().first else { throw UsageError.missingAuth }
+        return first.credentials
+    }
+
+    func credentialCandidates() -> [ClaudeCredentialCandidate] {
+        lock.withLock { candidates }
+    }
+
+    func discardOwnedCredentials() {
+        lock.withLock {
+            discardCount += 1
+            candidates.removeAll { $0.source == .claudexbar }
+        }
+    }
+}
+
+/// Answers by URL path: the token endpoint and the usage endpoint get
+/// separate canned responses; every request is recorded.
+private final class RoutingHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var requests: [URLRequest] = []
+    private let refreshStatus: Int
+    private let usageStatusByToken: [String: Int]
+    private let usageBody: Data
+
+    init(refreshStatus: Int, usageStatusByToken: [String: Int], usageBody: Data) {
+        self.refreshStatus = refreshStatus
+        self.usageStatusByToken = usageStatusByToken
+        self.usageBody = usageBody
+    }
+
+    var refreshRequestCount: Int {
+        lock.withLock { requests.filter { $0.httpMethod == "POST" }.count }
+    }
+
+    var usageTokens: [String] {
+        lock.withLock {
+            requests.filter { $0.httpMethod != "POST" }
+                .compactMap { $0.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") }
+        }
+    }
+
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        lock.withLock { requests.append(request) }
+        if request.httpMethod == "POST" {
+            return HTTPResponse(data: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: refreshStatus)
+        }
+        let token = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
+        let status = usageStatusByToken[token] ?? 401
+        return HTTPResponse(data: status == 200 ? usageBody : Data(), statusCode: status)
+    }
+}
+
+private let pastMillis = 1_000          // expired long ago
+private let futureMillis = Int.max / 2  // far in the future
+
+func testDeadOwnSessionFallsBackToFreshClaudeCodeLogin() throws {
+    // Exactly the 2026-10-28 situation: ClaudexBar's own session is expired
+    // and its refresh token is rejected, while Claude Code was just re-logged.
+    let reader = StubClaudeReader([
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "own-old", refreshToken: "own-dead-rt", expiresAt: pastMillis), source: .claudexbar),
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "cc-fresh", refreshToken: "cc-rt", expiresAt: futureMillis), source: .claudeCode)
+    ])
+    let http = RoutingHTTPClient(refreshStatus: 400, usageStatusByToken: ["cc-fresh": 200], usageBody: try fixtureData("claude_usage"))
+    let persisted = ResultBox<Int>(); persisted.value = 0
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in persisted.value! += 1 })
+
+    let result = runBlocking { await provider.fetchUsage() }
+    guard case .success = result else { throw TestFailure(description: "expected success via Claude Code login, got \(result)") }
+    try expect(http.usageTokens == ["cc-fresh"], "usage was read with Claude Code's fresh token: \(http.usageTokens)")
+    try expect(reader.discardCount == 1, "the definitively rejected own session is discarded")
+    try expect(persisted.value == 0, "nothing was persisted")
+
+    // Next poll goes straight to Claude Code — no repeated failing refresh.
+    _ = runBlocking { await provider.fetchUsage() }
+    try expect(http.refreshRequestCount == 1, "the dead refresh token isn't retried every minute")
+}
+
+func testClaudeCodeCredentialIsNeverRefreshed() throws {
+    // An expired Claude Code token must not be refreshed by ClaudexBar:
+    // refreshing rotates the refresh token and logs Claude Code out.
+    let reader = StubClaudeReader([
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "cc-old", refreshToken: "cc-rt", expiresAt: pastMillis), source: .claudeCode)
+    ])
+    let http = RoutingHTTPClient(refreshStatus: 200, usageStatusByToken: [:], usageBody: Data())
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    let result = runBlocking { await provider.fetchUsage() }
+    guard case .failure(.authExpired) = result else { throw TestFailure(description: "expected authExpired, got \(result)") }
+    try expect(http.refreshRequestCount == 0, "no refresh request is ever made with Claude Code's refresh token")
+    try expect(http.requests.isEmpty, "an expired foreign token isn't even sent")
+}
+
+func testClaudeCode401DoesNotTriggerRefresh() throws {
+    let reader = StubClaudeReader([
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "cc-revoked", refreshToken: "cc-rt", expiresAt: futureMillis), source: .claudeCode)
+    ])
+    let http = RoutingHTTPClient(refreshStatus: 200, usageStatusByToken: ["cc-revoked": 401], usageBody: Data())
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    let result = runBlocking { await provider.fetchUsage() }
+    guard case .failure(.authExpired) = result else { throw TestFailure(description: "expected authExpired, got \(result)") }
+    try expect(http.refreshRequestCount == 0, "a 401 on Claude Code's token doesn't refresh it either")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1306,6 +1419,9 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("dead own session falls back to fresh Claude Code login", testDeadOwnSessionFallsBackToFreshClaudeCodeLogin),
+    ("Claude Code credential is never refreshed", testClaudeCodeCredentialIsNeverRefreshed),
+    ("Claude Code 401 does not trigger refresh", testClaudeCode401DoesNotTriggerRefresh),
     ("full but started window shows countdown", testFullButStartedWindowShowsCountdown),
     ("unstarted window shapes still show window name", testUnstartedWindowShapesStillShowWindowName),
     ("auto-start acts on first observation after sleeping through a reset", testAutoStartActsOnFirstObservationAfterSleepingThroughReset),
