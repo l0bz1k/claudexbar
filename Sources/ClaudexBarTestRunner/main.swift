@@ -813,6 +813,56 @@ enum UpdateCheckerDigest {
     static func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 }
 
+// MARK: - v0.4.1: CDN block recognition
+
+private let cloudflareBlockPage = Data("""
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style global>body{font-family:Arial,Helvetica,sans-serif}</style>
+  </head>
+  <body><h1>Unable to load site</h1><p>Please try again later. If you are using a VPN, try turning it off.</p>
+  <p>Check the status page for information on outages.</p><p>[IP:45.141.79.41 | Ray ID:a5191cfb5ea596dd]</p></body>
+</html>
+""".utf8)
+
+private struct StaticHTTPClient: HTTPClient {
+    let status: Int
+    let body: Data
+    func data(for request: URLRequest) async throws -> HTTPResponse { HTTPResponse(data: body, statusCode: status) }
+}
+
+func testEdgeBlockIsRecognisedWithIP() throws {
+    let error = try expectNonNil(EdgeBlockDetector.blockError(statusCode: 403, body: cloudflareBlockPage), "block page recognised")
+    try expect(error == .blockedByEdge(ip: "45.141.79.41"), "exit IP extracted: \(error)")
+    try expect(error.statusLabel == "vpn" && !error.isTransient, "shown as 'vpn', not masked by stale data")
+    try expect(error.sanitizedDescription.contains("45.141.79.41"), "log line names the IP")
+}
+
+func testEdgeBlockDetectionIsNarrow() throws {
+    let json403 = Data(#"{"detail":"Forbidden"}"#.utf8)
+    try expect(EdgeBlockDetector.blockError(statusCode: 403, body: json403) == nil, "an API's own JSON 403 is not a CDN block")
+    try expect(EdgeBlockDetector.blockError(statusCode: 503, body: cloudflareBlockPage) == nil, "Cloudflare 5xx outage pages are not a block")
+    try expect(EdgeBlockDetector.blockError(statusCode: 403, body: Data("<html><body>Forbidden</body></html>".utf8)) == nil, "generic HTML 403 without Cloudflare markers is not a block")
+}
+
+func testProvidersReportEdgeBlock() throws {
+    let codex = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: StaticHTTPClient(status: 403, body: cloudflareBlockPage))
+    let codexResult = runBlocking { await codex.fetchUsage() }
+    guard case .failure(.blockedByEdge(ip: "45.141.79.41")) = codexResult else { throw TestFailure(description: "Codex: expected blockedByEdge, got \(codexResult)") }
+
+    let reader = StubClaudeReader([
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "t", refreshToken: nil, expiresAt: futureMillis), source: .claudeCode)
+    ])
+    let claude = ClaudeProvider(credentialReader: reader, httpClient: StaticHTTPClient(status: 403, body: cloudflareBlockPage), persistRefreshed: { _ in })
+    let claudeResult = runBlocking { await claude.fetchUsage() }
+    guard case .failure(.blockedByEdge) = claudeResult else { throw TestFailure(description: "Claude: expected blockedByEdge, got \(claudeResult)") }
+
+    let plain = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: StaticHTTPClient(status: 403, body: Data(#"{"detail":"x"}"#.utf8)))
+    let plainResult = runBlocking { await plain.fetchUsage() }
+    guard case .failure(.server(statusCode: 403)) = plainResult else { throw TestFailure(description: "plain 403 stays a server error, got \(plainResult)") }
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1462,6 +1512,9 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("edge block is recognised, with IP", testEdgeBlockIsRecognisedWithIP),
+    ("edge block detection is narrow", testEdgeBlockDetectionIsNarrow),
+    ("providers report edge block", testProvidersReportEdgeBlock),
     ("update checker targets the fork", testUpdateCheckerTargetsTheFork),
     ("update checker parses release with assets", testUpdateCheckerParsesReleaseWithAssets),
     ("update checksum verification", testUpdateChecksumVerification),

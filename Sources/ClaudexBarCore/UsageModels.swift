@@ -79,6 +79,9 @@ public enum UsageError: Error, Equatable, Sendable {
     case decoding
     case keychain
     case refreshFailed
+    /// The provider's CDN (Cloudflare) refused this network, typically the
+    /// exit IP of a VPN/proxy. Not the API, and not the credential.
+    case blockedByEdge(ip: String?)
 
     public var statusLabel: String {
         switch self {
@@ -88,6 +91,8 @@ public enum UsageError: Error, Equatable, Sendable {
             return "net"
         case .server, .decoding, .keychain:
             return "err"
+        case .blockedByEdge:
+            return "vpn"
         }
     }
 
@@ -98,7 +103,9 @@ public enum UsageError: Error, Equatable, Sendable {
         switch self {
         case .network, .rateLimited, .server:
             return true
-        case .missingAuth, .authExpired, .refreshFailed, .decoding, .keychain:
+        // A block persists until the route changes; showing stale numbers
+        // without saying so would hide that.
+        case .missingAuth, .authExpired, .refreshFailed, .decoding, .keychain, .blockedByEdge:
             return false
         }
     }
@@ -121,6 +128,9 @@ public enum UsageError: Error, Equatable, Sendable {
             return "Credential lookup failed"
         case .refreshFailed:
             return "Credential refresh failed"
+        case .blockedByEdge(let ip):
+            let address = ip.map { " IP \($0)" } ?? " this network's IP"
+            return "Blocked by Cloudflare for\(address) — likely the VPN/proxy exit; try another node"
         }
     }
 }

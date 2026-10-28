@@ -395,6 +395,7 @@ final class StatusBarController: NSObject {
         }
 
         button.image = StatusPillRenderer.image(provider: activeProvider, status: error?.statusLabel ?? "wait")
+        button.toolTip = error.map { "\(activeProvider.displayName): \($0.sanitizedDescription)" }
     }
 
     /// Hover text: what each figure means (so remaining vs used can't be

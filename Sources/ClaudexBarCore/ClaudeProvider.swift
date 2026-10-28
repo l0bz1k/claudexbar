@@ -132,7 +132,7 @@ public struct ClaudeProvider: UsageProvider {
         case 429:
             return .failure(.rateLimited)
         default:
-            return .failure(.server(statusCode: response.statusCode))
+            return .failure(EdgeBlockDetector.blockError(statusCode: response.statusCode, body: response.data) ?? .server(statusCode: response.statusCode))
         }
     }
 

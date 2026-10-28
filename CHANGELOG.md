@@ -3,6 +3,17 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-10-28
+
+### Changed
+- **A Cloudflare block now shows as "vpn" instead of "err".** chatgpt.com and
+  claude.ai sit behind Cloudflare, which can refuse a distrusted IP (often a
+  VPN/proxy exit) with an HTML "Unable to load site" page and HTTP 403. That
+  used to surface as a generic "err", which looks like an app or CLI bug. It's
+  now recognised (403 + HTML + Cloudflare markers only), the tray shows "vpn",
+  and the tooltip and log name the blocked IP and suggest another proxy node.
+- Hovering a status word ("auth", "net", "vpn", "err") now explains it.
+
 ## [0.4.0] — 2026-10-28
 
 ### Added
