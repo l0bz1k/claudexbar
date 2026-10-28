@@ -123,6 +123,27 @@ final class AppSettings {
         defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
     }
 
+    // MARK: Update checks
+
+    var lastUpdateCheck: Date? {
+        get { defaults.object(forKey: "lastUpdateCheck") as? Date }
+        set { defaults.set(newValue, forKey: "lastUpdateCheck") }
+    }
+
+    /// A version the user chose "Skip This Version" for: no menu item or
+    /// notification for it (a manual "Check for Updates…" still shows it).
+    var skippedUpdateVersion: String? {
+        get { defaults.string(forKey: "skippedUpdateVersion") }
+        set { defaults.set(newValue, forKey: "skippedUpdateVersion") }
+    }
+
+    /// Last version a notification was posted for, so the daily check
+    /// notifies once per release rather than once per day.
+    var notifiedUpdateVersion: String? {
+        get { defaults.string(forKey: "notifiedUpdateVersion") }
+        set { defaults.set(newValue, forKey: "notifiedUpdateVersion") }
+    }
+
     func autoStartEnabled(for provider: ProviderID) -> Bool {
         switch provider {
         case .claude: return autoStartClaudeEnabled

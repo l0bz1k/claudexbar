@@ -63,7 +63,7 @@ Works on **both Apple Silicon and Intel** Macs (macOS 13+).
 
 **After installing or updating, macOS asks once for Keychain access** ("ClaudexBar wants to use your confidential information…") — click **Always Allow**. Because the app is ad-hoc signed rather than signed with a Developer ID, macOS ties that permission to the exact build, so it asks again after each update. Until you answer, Claude Code usage shows `wait`.
 
-To update later, download the new release and repeat steps 1–2 (step 3 is only needed again if you moved or re-downloaded the app).
+ClaudexBar checks for new releases daily and offers **⬆ Update to x.y.z…** at the top of its menu — one click installs and relaunches. To update by hand instead, download the new release and repeat steps 1–2 (step 3 is only needed again if you moved or re-downloaded the app).
 
 The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/Spotlight rather than the Dock.
 

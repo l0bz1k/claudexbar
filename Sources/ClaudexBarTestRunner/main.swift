@@ -770,6 +770,49 @@ func testClaudeCode401DoesNotTriggerRefresh() throws {
     try expect(http.refreshRequestCount == 0, "a 401 on Claude Code's token doesn't refresh it either")
 }
 
+// MARK: - v0.4.0: in-app updates
+
+func testUpdateCheckerTargetsTheFork() throws {
+    // Upstream's releases lack this fork's patches; offering them as an
+    // "update" would silently downgrade users.
+    try expect(UpdateChecker.repoSlug == "l0bz1k/claudexbar", "update checks must come from the fork: \(UpdateChecker.repoSlug)")
+}
+
+func testUpdateCheckerParsesReleaseWithAssets() throws {
+    let json = #"""
+    {"tag_name":"v0.4.0","html_url":"https://github.com/l0bz1k/claudexbar/releases/tag/v0.4.0","body":"### Added\n- things",
+     "assets":[
+      {"name":"ClaudexBar.zip.sha256","browser_download_url":"https://example.com/ClaudexBar.zip.sha256"},
+      {"name":"ClaudexBar.zip","browser_download_url":"https://example.com/ClaudexBar.zip"}]}
+    """#
+    let update = try expectNonNil(UpdateChecker.parseRelease(Data(json.utf8), currentVersion: "0.3.3"), "release parses")
+    try expect(update.latest == "0.4.0" && update.isNewer, "v-prefix stripped and newer than 0.3.3")
+    try expect(update.zipURL?.absoluteString == "https://example.com/ClaudexBar.zip", "zip asset found by name")
+    try expect(update.checksumURL?.absoluteString == "https://example.com/ClaudexBar.zip.sha256", "checksum asset found by name")
+    try expect(update.canInstallInPlace && update.notes.contains("things"), "installable, notes kept")
+
+    let bare = #"{"tag_name":"v0.4.0","html_url":"https://x/y"}"#
+    let noAssets = try expectNonNil(UpdateChecker.parseRelease(Data(bare.utf8), currentVersion: "0.4.0"), "assetless release parses")
+    try expect(!noAssets.canInstallInPlace && !noAssets.isNewer, "no assets -> release page only; same version is not newer")
+}
+
+func testUpdateChecksumVerification() throws {
+    let data = Data("ClaudexBar archive".utf8)
+    // shasum -a 256 of the bytes above
+    let digest = "1d6ba51c8b1b2f2c35bdf0cc3cd0f7abf3b3d8db30b7ad91e2b3da8e5ee9e8c4"
+    let actual = UpdateCheckerDigest.hex(data)
+    try expect(UpdateChecker.matchesSHA256(data, checksumText: "\(actual)  ClaudexBar.zip\n"), "shasum format matches")
+    try expect(UpdateChecker.matchesSHA256(data, checksumText: actual.uppercased()), "bare, case-insensitive digest matches")
+    try expect(!UpdateChecker.matchesSHA256(data, checksumText: "\(digest)  ClaudexBar.zip"), "a different digest is rejected")
+    try expect(!UpdateChecker.matchesSHA256(data, checksumText: "not-a-hash"), "garbage is rejected")
+    try expect(!UpdateChecker.matchesSHA256(data, checksumText: ""), "empty is rejected")
+}
+
+import CryptoKit
+enum UpdateCheckerDigest {
+    static func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1419,6 +1462,9 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("update checker targets the fork", testUpdateCheckerTargetsTheFork),
+    ("update checker parses release with assets", testUpdateCheckerParsesReleaseWithAssets),
+    ("update checksum verification", testUpdateChecksumVerification),
     ("dead own session falls back to fresh Claude Code login", testDeadOwnSessionFallsBackToFreshClaudeCodeLogin),
     ("Claude Code credential is never refreshed", testClaudeCodeCredentialIsNeverRefreshed),
     ("Claude Code 401 does not trigger refresh", testClaudeCode401DoesNotTriggerRefresh),

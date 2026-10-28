@@ -3,6 +3,25 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-10-28
+
+### Added
+- **In-app updates.** ClaudexBar checks this fork's GitHub releases once a
+  day (at launch, after wake, and on an hourly tick once a day has passed —
+  the schedule survives sleep and relaunches). A newer version appears at the
+  top of the menu as "⬆ Update to x.y.z…", with one notification per release.
+  "Install and Relaunch" downloads the release, verifies it against the
+  published SHA-256, checks the version and signature of the unpacked app,
+  swaps it in (restoring the old one if anything fails) and relaunches.
+  "Skip This Version" and "Later" are available; the release page is always
+  one click away.
+
+### Fixed
+- **Update checks pointed at the upstream repository**, so a future upstream
+  release would have been offered as an "update" that drops every patch in
+  this fork. They now use this fork's releases.
+- Update prompts no longer suggest building from source.
+
 ## [0.3.3] — 2026-10-28
 
 ### Fixed

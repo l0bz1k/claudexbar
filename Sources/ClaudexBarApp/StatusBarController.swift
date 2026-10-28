@@ -27,6 +27,10 @@ final class StatusBarController: NSObject {
     private var countdownTimer: Timer?
     private var smartSwitchTimer: Timer?
     private var cliUpdateCheckTimer: Timer?
+    private var appUpdateCheckTimer: Timer?
+    /// A newer release of this fork, shown at the top of the menu.
+    private var availableUpdate: UpdateChecker.Update?
+    private var updateInstallInProgress = false
     private var smartSwitchEngine: SmartProviderSwitchEngine?
     private var usageDeltaTracker = UsageDeltaTracker()
     private var refreshesInFlight: Set<ProviderID> = []
@@ -76,7 +80,7 @@ final class StatusBarController: NSObject {
         scheduleTimers()
         configureCLIUpdates()
         checkCLIUpdatesQuietly()
-        checkForUpdatesQuietly()
+        checkForUpdatesIfDue()
     }
 
     /// Refresh shortly after the Mac wakes instead of waiting for the next
@@ -92,6 +96,7 @@ final class StatusBarController: NSObject {
                 guard let self else { return }
                 self.logger.log(provider: self.activeProvider, message: "woke from sleep, refreshing")
                 self.refreshAll()
+                self.checkForUpdatesIfDue()
             }
         }
     }
@@ -125,6 +130,14 @@ final class StatusBarController: NSObject {
         countdownTimer?.invalidate()
         smartSwitchTimer?.invalidate()
         cliUpdateCheckTimer?.invalidate()
+        appUpdateCheckTimer?.invalidate()
+
+        // Hourly tick, daily check: the last-check time is persisted, so a
+        // sleeping Mac or a relaunch doesn't reset or skip the schedule.
+        appUpdateCheckTimer = Timer.scheduledTimer(withTimeInterval: 60 * 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.checkForUpdatesIfDue() }
+        }
 
         refreshTimer = Timer.scheduledTimer(withTimeInterval: settings.refreshInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -404,6 +417,16 @@ final class StatusBarController: NSObject {
 
     private func showMenu() {
         let menu = NSMenu()
+        if let update = availableUpdate, update.isNewer {
+            let item = NSMenuItem(title: "", action: #selector(presentAvailableUpdate), keyEquivalent: "", target: self)
+            item.attributedTitle = NSAttributedString(
+                string: updateInstallInProgress ? "⬆  Installing \(update.latest)…" : "⬆  Update to \(update.latest)…",
+                attributes: [.font: NSFont.systemFont(ofSize: NSFont.menuFont(ofSize: 0).pointSize, weight: .semibold)]
+            )
+            item.isEnabled = !updateInstallInProgress
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         appendProviderRow(to: menu, provider: .codex)
         appendProviderRow(to: menu, provider: .claude)
         menu.addItem(.separator())
@@ -1062,20 +1085,20 @@ final class StatusBarController: NSObject {
 
     @objc private func checkForUpdates() {
         let version = appVersion
-        Task {
+        Task { [weak self] in
             let update = await UpdateChecker().latestRelease(currentVersion: version)
+            guard let self else { return }
             await MainActor.run {
-                NSApp.activate(ignoringOtherApps: true)
-                let alert = NSAlert()
-                alert.messageText = "ClaudexBar"
+                if let update {
+                    self.settings.lastUpdateCheck = Date()
+                    self.availableUpdate = update.isNewer ? update : nil
+                }
                 if let update, update.isNewer {
-                    alert.informativeText = "A newer version (\(update.latest)) is available — you have \(update.current).\n\nUpdate with:\n  git pull && ./scripts/install.sh"
-                    alert.addButton(withTitle: "Open Releases")
-                    alert.addButton(withTitle: "Close")
-                    if alert.runModal() == .alertFirstButtonReturn, let url = update.releaseURL {
-                        NSWorkspace.shared.open(url)
-                    }
+                    self.presentUpdate(update)
                 } else {
+                    NSApp.activate(ignoringOtherApps: true)
+                    let alert = NSAlert()
+                    alert.messageText = "ClaudexBar"
                     alert.informativeText = (update == nil)
                         ? "Couldn’t check for updates right now. You have \(version)."
                         : "You’re up to date (\(version))."
@@ -1086,22 +1109,98 @@ final class StatusBarController: NSObject {
         }
     }
 
-    /// Quiet check at launch: notify once if a newer release exists. Silent on
-    /// failure or when up to date.
-    private func checkForUpdatesQuietly() {
-        guard notificationsAvailable else { return }
+    /// Daily background check: at launch, after wake, and on an hourly tick,
+    /// but only when the last successful check is a day old.
+    private func checkForUpdatesIfDue() {
+        if let last = settings.lastUpdateCheck, Date().timeIntervalSince(last) < 24 * 60 * 60 { return }
         let version = appVersion
         Task { [weak self] in
-            guard let update = await UpdateChecker().latestRelease(currentVersion: version), update.isNewer else { return }
+            guard let update = await UpdateChecker().latestRelease(currentVersion: version) else { return }
             guard let self else { return }
-            await MainActor.run { self.sendUpdateNotification(update) }
+            await MainActor.run {
+                self.settings.lastUpdateCheck = Date()
+                guard update.isNewer, update.latest != self.settings.skippedUpdateVersion else {
+                    self.availableUpdate = nil
+                    return
+                }
+                self.availableUpdate = update
+                self.logger.log(provider: self.activeProvider, message: "update: \(update.latest) available (have \(update.current))")
+                if self.settings.notifiedUpdateVersion != update.latest {
+                    self.settings.notifiedUpdateVersion = update.latest
+                    self.sendUpdateNotification(update)
+                }
+            }
+        }
+    }
+
+    @objc private func presentAvailableUpdate() {
+        guard let update = availableUpdate else { return }
+        presentUpdate(update)
+    }
+
+    private func presentUpdate(_ update: UpdateChecker.Update) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "ClaudexBar \(update.latest) is available"
+        var text = "You have \(update.current)."
+        let notes = update.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !notes.isEmpty {
+            text += "\n\n" + (notes.count > 1200 ? String(notes.prefix(1200)) + "…" : notes)
+        }
+        if update.canInstallInPlace {
+            text += "\n\nAfter the update macOS asks once for Keychain access — choose “Always Allow”."
+            alert.addButton(withTitle: "Install and Relaunch")
+        }
+        alert.informativeText = text
+        alert.addButton(withTitle: "Release Page")
+        alert.addButton(withTitle: "Skip This Version")
+        alert.addButton(withTitle: "Later")
+
+        var response = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if !update.canInstallInPlace { response += 1 } // no install button: shift indices
+        switch response {
+        case 0:
+            installUpdate(update)
+        case 1:
+            if let url = update.releaseURL { NSWorkspace.shared.open(url) }
+        case 2:
+            settings.skippedUpdateVersion = update.latest
+            availableUpdate = nil
+        default:
+            break
+        }
+    }
+
+    private func installUpdate(_ update: UpdateChecker.Update) {
+        guard !updateInstallInProgress else { return }
+        updateInstallInProgress = true
+        logger.log(provider: activeProvider, message: "update: installing \(update.latest)")
+        Task { [weak self] in
+            guard let self else { return }
+            let failure = await AppUpdater.install(update, logger: self.logger)
+            // Only reached on failure — success relaunches and terminates.
+            await MainActor.run {
+                self.updateInstallInProgress = false
+                guard let failure else { return }
+                self.logger.log(provider: self.activeProvider, message: "update: failed — \(failure)")
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t install ClaudexBar \(update.latest)"
+                alert.informativeText = "The update stopped safely before changing anything: \(failure).\n\nYou can install it manually from the release page."
+                alert.addButton(withTitle: "Release Page")
+                alert.addButton(withTitle: "Close")
+                if alert.runModal() == .alertFirstButtonReturn, let url = update.releaseURL {
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
     }
 
     private func sendUpdateNotification(_ update: UpdateChecker.Update) {
+        guard notificationsAvailable else { return }
         let content = UNMutableNotificationContent()
-        content.title = "ClaudexBar update available"
-        content.body = "Version \(update.latest) is out (you have \(update.current)). Update with git pull && ./scripts/install.sh."
+        content.title = "ClaudexBar \(update.latest) is available"
+        content.body = "You have \(update.current). Open the ClaudexBar menu and choose “Update to \(update.latest)…”."
         let request = UNNotificationRequest(identifier: "update-\(update.latest)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
