@@ -38,6 +38,18 @@ enum AppPaths {
         if fileManager.fileExists(atPath: legacyURLCache.path) {
             try? fileManager.removeItem(at: legacyURLCache)
         }
+        // Work folders left behind by an update (the successful path ends by
+        // terminating, and an interrupted one can't clean up). Only touch ones
+        // older than an hour so a running update is never disturbed.
+        let temp = fileManager.temporaryDirectory
+        if let entries = try? fileManager.contentsOfDirectory(at: temp, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for entry in entries where entry.lastPathComponent.hasPrefix("ClaudexBar-Update-") {
+                let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                if Date().timeIntervalSince(modified) > 60 * 60 {
+                    try? fileManager.removeItem(at: entry)
+                }
+            }
+        }
         for name in ["claudexbar.err.log", "claudexbar.out.log"] {
             let url = logs.appendingPathComponent(name)
             if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int,

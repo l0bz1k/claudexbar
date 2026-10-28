@@ -3,6 +3,17 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — 2026-10-28
+
+### Fixed
+- **In-app update failed on a single dropped connection.** Downloads are now
+  retried up to three times with a short pause — proxied/VPN connections to
+  GitHub drop now and then, and a 404 can briefly appear while a release's
+  files are being re-uploaded. A failure now says why (HTTP status or network
+  error) instead of just "download failed".
+- A successful update no longer leaves its work folder in the temporary
+  directory; leftovers from interrupted updates are removed at launch.
+
 ## [0.4.1] — 2026-10-28
 
 ### Changed

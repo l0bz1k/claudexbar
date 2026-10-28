@@ -13,7 +13,7 @@ enum AppUpdater {
     enum Failure: Error, CustomStringConvertible {
         case noAssets
         case notWritable(URL)
-        case download
+        case download(String)
         case checksumMismatch
         case unpack
         case unexpectedBundle(String)
@@ -23,7 +23,7 @@ enum AppUpdater {
             switch self {
             case .noAssets: return "the release has no downloadable app"
             case .notWritable(let url): return "can't write to \(url.deletingLastPathComponent().path)"
-            case .download: return "download failed"
+            case .download(let why): return "download failed (\(why))"
             case .checksumMismatch: return "the download didn't match the published SHA-256"
             case .unpack: return "couldn't unpack the archive"
             case .unexpectedBundle(let why): return "unexpected archive contents (\(why))"
@@ -54,8 +54,16 @@ enum AppUpdater {
         }
 
         // 1. Download archive and checksum, verify.
-        guard let zipData = await download(zipURL),
-              let checksumData = await download(checksumURL) else { return .download }
+        let zipData: Data
+        let checksumData: Data
+        switch await download(zipURL) {
+        case .success(let data): zipData = data
+        case .failure(let why): return .download("archive: \(why)")
+        }
+        switch await download(checksumURL) {
+        case .success(let data): checksumData = data
+        case .failure(let why): return .download("checksum: \(why)")
+        }
         guard UpdateChecker.matchesSHA256(zipData, checksumText: String(decoding: checksumData, as: UTF8.self)) else {
             return .checksumMismatch
         }
@@ -110,6 +118,9 @@ enum AppUpdater {
         }
         logger.log(provider: .claude, message: "update: installed \(update.latest) (was \(update.current)), relaunching")
         logger.flush()
+        // `defer` won't run: this process terminates below. Clean up now —
+        // the previous version is no longer needed once the new one is in.
+        try? fileManager.removeItem(at: work)
 
         // 4. Relaunch. The short pause lets macOS register the freshly
         //    copied bundle; launching it instantly can be refused with a
@@ -122,14 +133,33 @@ enum AppUpdater {
         return nil
     }
 
-    private static func download(_ url: URL) async -> Data? {
+    enum DownloadError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { if case .failed(let why) = self { return why }; return "" }
+    }
+
+    /// Up to three attempts with a growing pause. Proxied/VPN connections to
+    /// GitHub drop now and then (resets, truncated responses), and a 404 can
+    /// briefly appear while a release's assets are being re-uploaded.
+    private static func download(_ url: URL, attempts: Int = 3) async -> Result<Data, DownloadError> {
         var request = URLRequest(url: url)
         request.setValue("ClaudexBar", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 120
-        guard let (data, response) = try? await URLSession.claudexbar.data(for: request),
-              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            return nil
+        var lastProblem = "no attempt made"
+        for attempt in 1...attempts {
+            do {
+                let (data, response) = try await URLSession.claudexbar.data(for: request)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if (200..<300).contains(status) { return .success(data) }
+                lastProblem = "HTTP \(status)"
+            } catch {
+                let nsError = error as NSError
+                lastProblem = "\(nsError.localizedDescription) [\(nsError.domain) \(nsError.code)]"
+            }
+            if attempt < attempts {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 3_000_000_000)
+            }
         }
-        return data
+        return .failure(.failed("\(lastProblem), after \(attempts) attempts"))
     }
 }
