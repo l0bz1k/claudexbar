@@ -28,14 +28,14 @@ public struct ClaudeProvider: UsageProvider {
     }
 
     public func fetchUsage() async -> Result<UsageSnapshot, UsageError> {
-        let candidates = credentialReader.credentialCandidates()
-        guard !candidates.isEmpty else { return .failure(.missingAuth) }
-
-        // Try each credential in order. Only an *auth* failure moves on to the
+        // Try each credential in order, reading a source only when the ones
+        // before it didn't work out. Only an *auth* failure moves on to the
         // next one; network, rate-limit and server errors are about the
         // service, and another credential wouldn't fare better.
         var lastError = UsageError.missingAuth
-        for candidate in candidates {
+        for loader in credentialReader.credentialLoaders() {
+            guard let credentials = loader.load() else { continue }
+            let candidate = ClaudeCredentialCandidate(credentials: credentials, source: loader.source)
             let result = await fetchUsage(with: candidate)
             guard case .failure(let error) = result else { return result }
             lastError = error

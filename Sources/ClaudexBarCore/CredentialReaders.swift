@@ -85,16 +85,38 @@ public struct ClaudeCredentialCandidate: Sendable {
     }
 }
 
+/// Reads one credential source on demand.
+public struct ClaudeCredentialLoader: Sendable {
+    public let source: ClaudeCredentialSource
+    public let load: @Sendable () -> ClaudeCredentials?
+
+    public init(source: ClaudeCredentialSource, load: @escaping @Sendable () -> ClaudeCredentials?) {
+        self.source = source
+        self.load = load
+    }
+}
+
 public protocol ClaudeCredentialReading: Sendable {
     func readCredentials() throws -> ClaudeCredentials
-    /// Every usable credential, most preferred first.
+    /// Every usable credential, most preferred first. Reads all sources.
     func credentialCandidates() -> [ClaudeCredentialCandidate]
+    /// The same sources, in the same order, but *not yet read*: callers read
+    /// the next one only if the previous didn't work out. Reading Claude
+    /// Code's Keychain item when it isn't needed costs a password prompt every
+    /// time Claude Code rewrites that item (which resets its access list).
+    func credentialLoaders() -> [ClaudeCredentialLoader]
     /// Drop ClaudexBar's own session after the server definitively rejected
     /// its refresh token, so it stops shadowing a valid Claude Code login.
     func discardOwnedCredentials()
 }
 
 extension ClaudeCredentialReading {
+    public func credentialLoaders() -> [ClaudeCredentialLoader] {
+        credentialCandidates().map { candidate in
+            ClaudeCredentialLoader(source: candidate.source) { candidate.credentials }
+        }
+    }
+
     public func credentialCandidates() -> [ClaudeCredentialCandidate] {
         (try? readCredentials()).map { [ClaudeCredentialCandidate(credentials: $0, source: .claudexbar)] } ?? []
     }
@@ -121,8 +143,10 @@ public struct ClaudeCredentialReader: ClaudeCredentialReading {
     }
 
     public func readCredentials() throws -> ClaudeCredentials {
-        guard let first = credentialCandidates().first else { throw UsageError.missingAuth }
-        return first.credentials
+        for loader in credentialLoaders() {
+            if let credentials = loader.load() { return credentials }
+        }
+        throw UsageError.missingAuth
     }
 
     /// Explicit override first, then ClaudexBar's own session, then Claude
@@ -131,24 +155,28 @@ public struct ClaudeCredentialReader: ClaudeCredentialReading {
     /// login — the situation after `claude login` that previously left the
     /// app stuck on "auth".
     public func credentialCandidates() -> [ClaudeCredentialCandidate] {
-        var candidates: [ClaudeCredentialCandidate] = []
-        if let credentials = try? Self.credentialsFromEnvironment(environment) {
-            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .environment))
+        credentialLoaders().compactMap { loader in
+            loader.load().map { ClaudeCredentialCandidate(credentials: $0, source: loader.source) }
         }
-        if let credentials = credentialStore.load() {
-            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudexbar))
-        }
+    }
+
+    public func credentialLoaders() -> [ClaudeCredentialLoader] {
+        let environment = self.environment
+        let store = credentialStore
+        let fallbackURL = self.fallbackURL
+        var loaders = [
+            ClaudeCredentialLoader(source: .environment) { try? Self.credentialsFromEnvironment(environment) },
+            ClaudeCredentialLoader(source: .claudexbar) { store.load() }
+        ]
         for service in keychainServices {
-            if let data = keychainData(service: service),
-               let credentials = Self.decodeCredentials(data: data) {
-                candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudeCode))
-            }
+            loaders.append(ClaudeCredentialLoader(source: .claudeCode) { [self] in
+                keychainData(service: service).flatMap(Self.decodeCredentials(data:))
+            })
         }
-        if let data = try? Data(contentsOf: fallbackURL),
-           let credentials = Self.decodeCredentials(data: data) {
-            candidates.append(ClaudeCredentialCandidate(credentials: credentials, source: .claudeCode))
-        }
-        return candidates
+        loaders.append(ClaudeCredentialLoader(source: .claudeCode) {
+            (try? Data(contentsOf: fallbackURL)).flatMap(Self.decodeCredentials(data:))
+        })
+        return loaders
     }
 
     public func discardOwnedCredentials() {

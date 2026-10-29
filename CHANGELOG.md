@@ -3,6 +3,17 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] — 2026-10-29
+
+### Fixed
+- **Repeated Keychain password prompts.** Since 0.3.3 every poll read *all*
+  credential sources up front, including Claude Code's Keychain item, even
+  while ClaudexBar's own session worked. Claude Code rewrites that item when it
+  refreshes its token, which resets the item's access list — so each of those
+  refreshes cost a password prompt (and the pending prompt stalled Claude
+  updates in the tray). Sources are now read lazily: Claude Code's item is only
+  touched when ClaudexBar's own session can't be used.
+
 ## [0.4.2] — 2026-10-28
 
 ### Fixed

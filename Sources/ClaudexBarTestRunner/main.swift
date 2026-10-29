@@ -863,6 +863,59 @@ func testProvidersReportEdgeBlock() throws {
     guard case .failure(.server(statusCode: 403)) = plainResult else { throw TestFailure(description: "plain 403 stays a server error, got \(plainResult)") }
 }
 
+// MARK: - v0.4.3: credential sources are read lazily
+
+private final class CountingClaudeReader: ClaudeCredentialReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _claudeCodeReads = 0
+    var claudeCodeReads: Int { lock.withLock { _claudeCodeReads } }
+    let own: ClaudeCredentials?
+    let claudeCode: ClaudeCredentials
+
+    init(own: ClaudeCredentials?, claudeCode: ClaudeCredentials) {
+        self.own = own
+        self.claudeCode = claudeCode
+    }
+
+    func readCredentials() throws -> ClaudeCredentials { throw UsageError.missingAuth }
+
+    func credentialLoaders() -> [ClaudeCredentialLoader] {
+        [
+            ClaudeCredentialLoader(source: .claudexbar) { [own] in own },
+            ClaudeCredentialLoader(source: .claudeCode) { [self] in
+                lock.withLock { _claudeCodeReads += 1 }
+                return claudeCode
+            }
+        ]
+    }
+}
+
+func testWorkingOwnSessionNeverReadsClaudeCodeKeychain() throws {
+    // Each read of Claude Code's Keychain item can cost a password prompt
+    // (Claude Code rewriting the item resets its access list).
+    let reader = CountingClaudeReader(
+        own: ClaudeCredentials(accessToken: "own", refreshToken: "rt", expiresAt: futureMillis),
+        claudeCode: ClaudeCredentials(accessToken: "cc", refreshToken: nil, expiresAt: futureMillis)
+    )
+    let http = RoutingHTTPClient(refreshStatus: 200, usageStatusByToken: ["own": 200], usageBody: try fixtureData("claude_usage"))
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    for _ in 0..<5 {
+        guard case .success = runBlocking({ await provider.fetchUsage() }) else { throw TestFailure(description: "own session should succeed") }
+    }
+    try expect(reader.claudeCodeReads == 0, "Claude Code's credential is never read while the own session works: \(reader.claudeCodeReads)")
+}
+
+func testDeadOwnSessionStillFallsBackLazily() throws {
+    let reader = CountingClaudeReader(
+        own: nil,
+        claudeCode: ClaudeCredentials(accessToken: "cc", refreshToken: nil, expiresAt: futureMillis)
+    )
+    let http = RoutingHTTPClient(refreshStatus: 200, usageStatusByToken: ["cc": 200], usageBody: try fixtureData("claude_usage"))
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    guard case .success = runBlocking({ await provider.fetchUsage() }) else { throw TestFailure(description: "fallback to Claude Code should succeed") }
+    try expect(reader.claudeCodeReads == 1, "Claude Code's credential is read when it's actually needed")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1512,6 +1565,8 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("working own session never reads Claude Code keychain", testWorkingOwnSessionNeverReadsClaudeCodeKeychain),
+    ("dead own session still falls back lazily", testDeadOwnSessionStillFallsBackLazily),
     ("edge block is recognised, with IP", testEdgeBlockIsRecognisedWithIP),
     ("edge block detection is narrow", testEdgeBlockDetectionIsNarrow),
     ("providers report edge block", testProvidersReportEdgeBlock),
