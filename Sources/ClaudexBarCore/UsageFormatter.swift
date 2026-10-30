@@ -76,12 +76,15 @@ public enum UsageFormatter {
             return UsageMetricDisplay(label: unavailableLabel, value: "∞")
         }
         let display = display(for: window, now: now)
+        if let value = window.displayValue {
+            return UsageMetricDisplay(label: display.label, value: value)
+        }
         let shown = mode == .used ? 100 - display.remainingPercent : display.remainingPercent
         return UsageMetricDisplay(label: display.label, value: "\(shown)%")
     }
 
     public static func percentText(for window: UsageWindow?, mode: PercentMode = .remaining) -> String {
-        window.map { "\(mode == .used ? $0.usedPercent : $0.remainingPercent)%" } ?? "∞"
+        window.map { $0.displayValue ?? "\(mode == .used ? $0.usedPercent : $0.remainingPercent)%" } ?? "∞"
     }
 
     /// Minimum evidence before projecting a pace: early in a window a single

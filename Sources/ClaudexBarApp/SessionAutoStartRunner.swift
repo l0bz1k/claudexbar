@@ -36,7 +36,7 @@ enum SessionAutoStartRunner {
         let scratch = scratchDirectory()
         let arguments: [String]
         switch provider {
-        case .openrouter, .opencodeGo:
+        case .openrouter, .opencodeGo, .opencodeFree:
             return .failure(.executableNotFound)
         case .claude:
             arguments = [

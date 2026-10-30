@@ -44,6 +44,9 @@ public enum CLIVersionParser {
         case .codex:
             guard let version = root["version"] as? String else { return nil }
             return semanticVersion(in: version)
+        case .opencodeFree:
+            guard let tag = root["tag_name"] as? String else { return nil }
+            return semanticVersion(in: tag)
         case .openrouter, .opencodeGo:
             return nil // API-key providers: no CLI of their own to update
         }
@@ -59,7 +62,7 @@ public struct CLILatestVersionChecker: Sendable {
 
     public func fetchLatestVersions() async -> [ProviderID: String] {
         await withTaskGroup(of: (ProviderID, String?).self) { group in
-            for provider in ProviderID.allCases where provider.isCodingCLI {
+            for provider in ProviderID.allCases where provider.hasCLI {
                 group.addTask {
                     (provider, await latestVersion(for: provider))
                 }
@@ -80,6 +83,8 @@ public struct CLILatestVersionChecker: Sendable {
             urlString = "https://api.github.com/repos/anthropics/claude-code/releases/latest"
         case .codex:
             urlString = "https://registry.npmjs.org/%40openai%2Fcodex/latest"
+        case .opencodeFree:
+            urlString = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
         case .openrouter, .opencodeGo:
             return nil
         }
@@ -88,7 +93,7 @@ public struct CLILatestVersionChecker: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("ClaudexBar", forHTTPHeaderField: "User-Agent")
-        if provider == .claude {
+        if provider == .claude || provider == .opencodeFree {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         }
 

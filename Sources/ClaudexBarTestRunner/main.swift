@@ -997,6 +997,61 @@ func testOpenCodeGoHTTPOutcomes() throws {
     guard case .failure(.missingAuth) = runBlocking({ await noKey.fetchUsage() }) else { throw TestFailure(description: "no key -> missingAuth") }
 }
 
+// MARK: - v0.5.1: OpenCode Free, opencode version, aligned menu
+
+/// The real refusal opencode stored on 2026-10-30 (trimmed).
+private let realFreeTierRefusal = #"""
+{"role":"assistant","providerID":"opencode","modelID":"flint-40b-free","time":{"created":1793365969598,"completed":1793366137246},
+ "error":{"name":"APIError","data":{"message":"Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go",
+  "statusCode":429,"isRetryable":true,"responseHeaders":{"date":"Fri, 30 Oct 2026 13:15:37 GMT","retry-after":"42127"}}}}
+"""#
+
+func testOpenCodeFreeResetFromRealRefusal() throws {
+    let reset = try expectNonNil(OpenCodeFreeProvider.resetDate(fromRefusal: realFreeTierRefusal), "reset computed")
+    try expect(reset == ISO8601DateFormatter().date(from: "2026-10-31T00:57:44Z"), "Date header + Retry-After: \(reset)")
+
+    let during = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, now: ISO8601DateFormatter().date(from: "2026-10-30T20:21:00Z")!)
+    try expect(during.primary?.remainingPercent == 0 && during.primary?.resetAt == reset, "blocked: 0% with a countdown")
+    try expect(UsageFormatter.metricDisplay(for: during.primary, unavailableLabel: "free", now: ISO8601DateFormatter().date(from: "2026-10-30T20:21:00Z")!).label == "4h36m", "tray counts down to the reset")
+
+    let after = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, now: ISO8601DateFormatter().date(from: "2026-10-31T01:00:00Z")!)
+    try expect(after.primary?.displayValue == "ok" && UsageFormatter.percentText(for: after.primary) == "ok", "after the reset: 'ok', not an invented percentage")
+    try expect(OpenCodeFreeProvider.snapshot(refusalJSON: nil, now: Date()).primary?.displayValue == "ok", "never refused: 'ok'")
+
+    let otherProvider = realFreeTierRefusal.replacingOccurrences(of: #""providerID":"opencode""#, with: #""providerID":"openrouter""#)
+    try expect(OpenCodeFreeProvider.resetDate(fromRefusal: otherProvider) == nil, "another provider's 429 is not opencode's free tier")
+}
+
+func testOpenCodeFreeReadsNewestRefusalFromDatabase() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-ocdb-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let db = dir.appendingPathComponent("opencode.db")
+    func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
+    let older = realFreeTierRefusal.replacingOccurrences(of: "42127", with: "60")
+    let userText = #"{"role":"user","text":"why do I get Free usage exceeded?"}"#
+    let sql = """
+    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
+    INSERT INTO message VALUES ('a','s',1,1,\(q(older)));
+    INSERT INTO message VALUES ('b','s',2,2,\(q(realFreeTierRefusal)));
+    INSERT INTO message VALUES ('c','s',3,3,\(q(userText)));
+    """
+    let created = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, sql], timeout: 20)
+    }
+    try expect(created.succeeded, "test database created: \(created.stderr)")
+    let newest = try expectNonNil(OpenCodeFreeProvider.latestRefusal(databaseURL: db), "database readable")
+    try expect(newest.contains("42127"), "the newest stored refusal is used, user text mentioning the error is ignored")
+    try expect(OpenCodeFreeProvider.latestRefusal(databaseURL: dir.appendingPathComponent("missing.db")) == nil, "missing database -> unreadable")
+}
+
+func testOpencodeCLIVersionAndCapabilities() throws {
+    try expect(ProviderID.opencodeFree.hasCLI && !ProviderID.opencodeFree.isCodingCLI, "opencode shows a version but gets no auto-start/auto-update")
+    try expect(!ProviderID.openrouter.hasCLI && !ProviderID.opencodeFree.enabledByDefault, "API rows carry no CLI; OpenCode Free is opt-in")
+    let release = Data(#"{"tag_name":"v2.2.3"}"#.utf8)
+    try expect(CLIVersionParser.latestVersion(provider: .opencodeFree, from: release) == "2.2.3", "opencode latest version from its GitHub release")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1646,6 +1701,9 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("OpenCode Free reset from real refusal", testOpenCodeFreeResetFromRealRefusal),
+    ("OpenCode Free reads newest refusal from database", testOpenCodeFreeReadsNewestRefusalFromDatabase),
+    ("opencode CLI version and capabilities", testOpencodeCLIVersionAndCapabilities),
     ("OpenRouter parses quota and credits", testOpenRouterParsesQuotaAndCredits),
     ("OpenRouter prefers key limit; partial quota", testOpenRouterPrefersKeyLimitAndPartialQuota),
     ("OpenCode Go parses documented shape", testOpenCodeGoParsesDocumentedShape),

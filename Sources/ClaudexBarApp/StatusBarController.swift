@@ -16,7 +16,8 @@ final class StatusBarController: NSObject {
             try? ClaudeCredentialStore().save(credentials)
         }),
         .openrouter: OpenRouterProvider(),
-        .opencodeGo: OpenCodeGoProvider()
+        .opencodeGo: OpenCodeGoProvider(),
+        .opencodeFree: OpenCodeFreeProvider()
     ]
 
     private var snapshots: [ProviderID: UsageSnapshot] = [:]
@@ -433,7 +434,9 @@ final class StatusBarController: NSObject {
             menu.addItem(item)
             menu.addItem(.separator())
         }
-        ProviderID.allCases.forEach { appendProviderRow(to: menu, provider: $0) }
+        let rows = ProviderID.allCases.map { (label: $0.displayName, version: providerVersionBadge($0), hint: providerStatusHint($0)) }
+        let layout = ProviderRowLayout.make(rows: rows)
+        ProviderID.allCases.forEach { appendProviderRow(to: menu, provider: $0, layout: layout) }
         menu.addItem(.separator())
 
         // "Refresh All" by default; holding Option swaps it for "Open Logs…"
@@ -475,12 +478,13 @@ final class StatusBarController: NSObject {
     /// Provider row: a custom view that toggles the provider's enabled state
     /// **without closing the menu** (settings-checklist feel). Holding Option
     /// swaps it (native alternate item) for that provider's "Re-auth" action.
-    private func appendProviderRow(to menu: NSMenu, provider: ProviderID) {
+    private func appendProviderRow(to menu: NSMenu, provider: ProviderID, layout: ProviderRowLayout) {
         let row = NSMenuItem()
         row.view = ProviderToggleView(
             label: provider.displayName,
             version: providerVersionBadge(provider),
             hint: providerStatusHint(provider),
+            layout: layout,
             isEnabled: { [weak self] in self?.providerSelection.enabledProviders.contains(provider) ?? false },
             onToggle: { [weak self] in self?.toggleProviderEnabled(provider) }
         )
@@ -496,15 +500,19 @@ final class StatusBarController: NSObject {
 
     /// Inline status shown after the provider name: remaining percentages when
     /// usage is available, otherwise a status word (`login`/`auth`/`net`/`err`).
-    private func providerStatusHint(_ provider: ProviderID) -> String {
+    private func providerStatusHint(_ provider: ProviderID) -> ProviderRowHint {
         if let override = statusOverrides[provider] {
-            return override
+            return .status(override)
         }
         if let snapshot = snapshots[provider], errors[provider] == nil {
-            return "\(UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)) · \(UsageFormatter.percentText(for: snapshot.secondary, mode: settings.percentMode))"
+            let first = UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)
+            if snapshot.secondary == nil, provider == .opencodeFree {
+                return .figure(first) // a single window: no second column
+            }
+            return ProviderRowHint(primary: first, secondary: UsageFormatter.percentText(for: snapshot.secondary, mode: settings.percentMode))
         }
-        if let error = errors[provider] { return error.statusLabel }
-        return "wait"
+        if let error = errors[provider] { return .status(error.statusLabel) }
+        return .status("wait")
     }
 
     private func providerVersionBadge(_ provider: ProviderID) -> ProviderVersionBadge? {
@@ -714,7 +722,7 @@ final class StatusBarController: NSObject {
         switch provider {
         case .codex: reauthCodex()
         case .claude: reauthClaude()
-        case .openrouter, .opencodeGo:
+        case .openrouter, .opencodeGo, .opencodeFree:
             // The key lives in opencode's auth store; `opencode auth login`
             // (re)adds it. The next poll picks it up.
             runInTerminal(providers[provider]?.reauthCommand())

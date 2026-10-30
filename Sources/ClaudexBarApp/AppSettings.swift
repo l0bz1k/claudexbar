@@ -148,7 +148,7 @@ final class AppSettings {
         switch provider {
         case .claude: return autoStartClaudeEnabled
         case .codex: return autoStartCodexEnabled
-        case .openrouter, .opencodeGo: return false // no session window to anchor
+        case .openrouter, .opencodeGo, .opencodeFree: return false // no session window to anchor
         }
     }
 
@@ -156,7 +156,7 @@ final class AppSettings {
         switch provider {
         case .claude: autoStartClaudeEnabled = enabled
         case .codex: autoStartCodexEnabled = enabled
-        case .openrouter, .opencodeGo: break
+        case .openrouter, .opencodeGo, .opencodeFree: break
         }
     }
 }

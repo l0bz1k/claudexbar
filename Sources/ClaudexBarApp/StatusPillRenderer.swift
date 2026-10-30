@@ -52,6 +52,10 @@ enum StatusPillRenderer {
             now: now,
             mode: mode
         )
+        // A one-window provider (OpenCode Free) leaves the second column empty
+        // instead of showing a placeholder.
+        let secondaryLabel = provider == .opencodeFree && snapshot.secondary == nil ? "" : secondary.label
+        let secondaryValue = provider == .opencodeFree && snapshot.secondary == nil ? "" : secondary.value
         func label(_ base: String, _ window: UsageWindow?, enabled: Bool) -> String {
             guard enabled, UsageFormatter.pace(for: window, now: now)?.runsOutBeforeReset == true else { return base }
             return "\(base) \(paceMarker)"
@@ -60,8 +64,8 @@ enum StatusPillRenderer {
             provider: provider,
             primaryLabel: label(primary.label, snapshot.primary, enabled: sessionPaceWarning),
             primaryValue: primary.value,
-            secondaryLabel: label(secondary.label, snapshot.secondary, enabled: longPaceWarning),
-            secondaryValue: secondary.value
+            secondaryLabel: label(secondaryLabel, snapshot.secondary, enabled: longPaceWarning),
+            secondaryValue: secondaryValue
         )
     }
 

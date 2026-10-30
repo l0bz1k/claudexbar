@@ -15,6 +15,13 @@ enum CLIExecutableLocator {
         switch provider {
         case .openrouter, .opencodeGo:
             return nil // read with an API key; no CLI of their own
+        case .opencodeFree:
+            candidates = [
+                "\(home)/.opencode/bin/opencode",
+                "\(home)/.local/bin/opencode",
+                "/opt/homebrew/bin/opencode",
+                "/usr/local/bin/opencode"
+            ]
         case .claude:
             candidates = [
                 "\(home)/.local/bin/claude",
@@ -52,7 +59,10 @@ actor CLIUpdateManager {
         defer { updateInProgress = false }
 
         var results: [CLICommandResult] = []
-        for provider in ProviderID.allCases {
+        // opencode's version is shown but it is never auto-updated: its
+        // releases include major-version jumps (1.x → 2.x), which should be
+        // the user's decision, not a background job's.
+        for provider in ProviderID.allCases where provider.isCodingCLI {
             guard let executable = CLIExecutableLocator.executable(for: provider) else {
                 results.append(CLICommandResult(provider: provider, exitCode: 127))
                 continue

@@ -88,7 +88,7 @@ public struct OpenRouterProvider: UsageProvider {
     public init(
         keyReader: OpencodeKeyReader = OpencodeKeyReader(),
         httpClient: any HTTPClient = URLSessionHTTPClient(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.keyReader = keyReader
         self.httpClient = httpClient
@@ -193,7 +193,7 @@ public struct OpenCodeGoProvider: UsageProvider {
     public init(
         keyReader: OpencodeKeyReader = OpencodeKeyReader(),
         httpClient: any HTTPClient = URLSessionHTTPClient(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.keyReader = keyReader
         self.httpClient = httpClient

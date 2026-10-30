@@ -3,6 +3,27 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-10-30
+
+### Added
+- **OpenCode Free** provider — opencode's own free tier (Zen free models).
+  It has no usage API: the server only answers "Free usage limit reached"
+  (HTTP 429 + `Retry-After`) when a request is refused. opencode stores that
+  response, headers included, in its local database; ClaudexBar reads the
+  newest one (read-only, no network) and shows 0% with a countdown to the
+  reset. Otherwise it shows "ok" — the remaining free allowance is never
+  reported, so there's no honest percentage to show. Opt-in in the menu.
+- **opencode's version** on the OpenCode Free row, green when current and
+  orange when a newer release exists — like Codex and Claude Code. It's
+  deliberately **not** auto-updated: opencode releases include major-version
+  jumps (1.x → 2.x), which should be your call.
+
+### Changed
+- **Usage figures in the menu line up in columns.** The name column is as
+  wide as the longest provider name (with its version), the first figure is
+  right-aligned and the second follows a common separator, so session values
+  sit under session values and weekly under weekly.
+
 ## [0.5.0] — 2026-10-30
 
 ### Added

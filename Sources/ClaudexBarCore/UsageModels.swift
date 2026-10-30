@@ -5,6 +5,7 @@ public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
     case claude
     case openrouter
     case opencodeGo = "opencode-go"
+    case opencodeFree = "opencode-free"
 
     public var displayName: String {
         switch self {
@@ -12,6 +13,7 @@ public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
         case .claude: return "Claude Code"
         case .openrouter: return "OpenRouter"
         case .opencodeGo: return "OpenCode Go"
+        case .opencodeFree: return "OpenCode Free"
         }
     }
 
@@ -21,6 +23,12 @@ public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
     /// providers (OpenRouter, OpenCode Go) are read with a key opencode stores.
     public var isCodingCLI: Bool {
         self == .codex || self == .claude
+    }
+
+    /// Providers whose row shows an installed CLI's version: Codex, Claude
+    /// Code, and opencode (on its own free-tier row).
+    public var hasCLI: Bool {
+        isCodingCLI || self == .opencodeFree
     }
 
     /// Off unless the user turns them on, so existing setups don't start
@@ -82,13 +90,17 @@ public struct UsageWindow: Equatable, Sendable {
     /// Human name for tooltips ("Free-model requests today"); nil means the
     /// generic session/weekly naming.
     public let title: String?
+    /// Shown instead of a percentage when there is no honest number to show
+    /// (e.g. "ok" for a free tier that never reports how much is left).
+    public let displayValue: String?
 
-    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil, title: String? = nil) {
+    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil, title: String? = nil, displayValue: String? = nil) {
         self.windowLabel = windowLabel
         self.remainingPercent = max(0, min(100, remainingPercent))
         self.resetAt = resetAt
         self.windowDuration = windowDuration
         self.title = title
+        self.displayValue = displayValue
     }
 
     public var usedPercent: Int { 100 - remainingPercent }
