@@ -144,6 +144,46 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: "notifiedUpdateVersion") }
     }
 
+    // MARK: AI Golden Hour
+
+    var goldenHourEnabled: Bool {
+        get { defaults.bool(forKey: "goldenHourEnabled") }
+        set { defaults.set(newValue, forKey: "goldenHourEnabled") }
+    }
+
+    var goldenHour: GoldenHour? {
+        get {
+            guard defaults.object(forKey: "goldenHourMinutes") != nil else { return nil }
+            return GoldenHour(minutesSinceMidnight: defaults.integer(forKey: "goldenHourMinutes"))
+        }
+        set {
+            if let newValue {
+                defaults.set(newValue.minutesSinceMidnight, forKey: "goldenHourMinutes")
+            } else {
+                defaults.removeObject(forKey: "goldenHourMinutes")
+            }
+        }
+    }
+
+    /// The golden time a provider's window was last anchored for — so a window
+    /// we started on purpose isn't reported as a miss.
+    func goldenAnchoredFor(_ provider: ProviderID) -> Date? {
+        defaults.object(forKey: "goldenAnchoredFor.\(provider.rawValue)") as? Date
+    }
+
+    func setGoldenAnchoredFor(_ date: Date?, for provider: ProviderID) {
+        defaults.set(date, forKey: "goldenAnchoredFor.\(provider.rawValue)")
+    }
+
+    /// The golden time a "can't make it today" notification was last sent for.
+    func goldenMissNotifiedFor(_ provider: ProviderID) -> Date? {
+        defaults.object(forKey: "goldenMissNotifiedFor.\(provider.rawValue)") as? Date
+    }
+
+    func setGoldenMissNotifiedFor(_ date: Date?, for provider: ProviderID) {
+        defaults.set(date, forKey: "goldenMissNotifiedFor.\(provider.rawValue)")
+    }
+
     // MARK: CLI updates
 
     /// Whether "Update Selected CLIs" and the daily auto-update may update this

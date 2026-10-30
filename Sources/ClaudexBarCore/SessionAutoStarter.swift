@@ -135,12 +135,22 @@ public final class SessionAutoStarter {
             return .skip(reason: .launchBackoff)
         }
 
-        if let last = state.lastAttemptAt, now.timeIntervalSince(last) < config.minIntervalBetweenAttempts {
+        // Caps follow the window's own length when known, so a provider with,
+        // say, a 3-hour window isn't throttled by limits sized for 5 hours:
+        // one attempt per window (minus slack for providers that round a
+        // window's start down by up to 10 minutes), and enough per day for
+        // every window that fits in one.
+        let cooldown = window.windowDuration.map { min(config.minIntervalBetweenAttempts, $0 - 10 * 60) }
+            ?? config.minIntervalBetweenAttempts
+        let dailyCap = window.windowDuration.map { max(config.maxAttemptsPerDay, Int((24 * 60 * 60 / $0).rounded(.up))) }
+            ?? config.maxAttemptsPerDay
+
+        if let last = state.lastAttemptAt, now.timeIntervalSince(last) < cooldown {
             return .skip(reason: .cooldown)
         }
 
         state.attemptsInLast24h = state.attemptsInLast24h.filter { now.timeIntervalSince($0) < 24 * 60 * 60 }
-        guard state.attemptsInLast24h.count < config.maxAttemptsPerDay else {
+        guard state.attemptsInLast24h.count < dailyCap else {
             return .skip(reason: .dailyCapReached)
         }
 

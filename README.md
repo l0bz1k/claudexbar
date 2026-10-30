@@ -33,6 +33,8 @@ This fork exists to fix a handful of real issues hit running the original daily 
 
 - **OpenRouter and OpenCode Go** limits alongside Codex and Claude Code, using the API key opencode already stores (opt-in in the menu).
 
+- **AI Golden Hour**: pick a time of day and ClaudexBar times your session windows so the limit resets to 100% right then, every day.
+
 Full details, including the two real bugs found and fixed along the way, are in [CHANGELOG.md](CHANGELOG.md#020--2026-09-26).
 
 ## Screenshots

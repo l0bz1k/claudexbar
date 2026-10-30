@@ -38,7 +38,8 @@ enum DiagnosticsReport {
         lines.append("## Settings")
         lines.append("enabled: \(settings.enabledProviders.map(\.rawValue).sorted().joined(separator: ", ")); active: \(activeProvider.rawValue)")
         lines.append("refresh: \(Int(settings.refreshInterval))s; percent: \(settings.percentMode.rawValue); pace warning session/long: \(settings.paceWarningSession)/\(settings.paceWarningLong); smart switch: \(settings.smartSwitchEnabled)")
-        lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled)")
+        lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled) \(settings.cliUpdateProviders.map(\.rawValue))")
+        lines.append("golden hour: \(settings.goldenHourEnabled ? "on" : "off") at \(settings.goldenHour?.label ?? "—")")
 
         for provider in ProviderID.allCases where settings.enabledProviders.contains(provider) || provider.isCodingCLI {
             lines.append("")

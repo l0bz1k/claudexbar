@@ -3,6 +3,28 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-10-31
+
+### Added
+- **AI Golden Hour** (Auto-start 5h Session → AI Golden Hour). Pick a time of
+  day; every day while it's on, session windows are timed so they reset —
+  back to 100% — at that time. A window resets a fixed time after it starts,
+  so ClaudexBar anchors it that much earlier (09:00 for a 14:00 golden hour
+  with 5-hour windows). Windows that fit before then still start as usual —
+  none are skipped; only the one that would still be running at the anchor
+  time is held until it. Works for every provider with a session window,
+  whatever its length. The picker suggests now + 5 h 01 min; a time less than
+  a window away starts working the next day. If a window is already running
+  at the anchor time (you were working), you get one notification that
+  today's golden hour isn't reachable, and the usual schedule continues. With
+  the lid closed the anchor goes out at the next wake, so the reset can come
+  late.
+
+### Changed
+- Auto-start's cooldown and daily attempt cap follow the window's length
+  (one attempt per window, minus 10 minutes for providers that round a
+  window's start down), instead of a fixed 5 hours / 5 per day.
+
 ## [0.6.1] — 2026-10-30
 
 ### Changed

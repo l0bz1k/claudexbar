@@ -1063,6 +1063,90 @@ func testCLIUpdateSelectionDefaults() throws {
     try expect(ProviderID.opencodeFree.cliName == "opencode" && ProviderID.claude.cliName == "Claude Code", "CLI names in the menu")
 }
 
+// MARK: - v0.7.0: AI Golden Hour
+
+private var moscow: Calendar {
+    var c = Calendar(identifier: .gregorian)
+    c.timeZone = TimeZone(identifier: "Europe/Moscow")!
+    return c
+}
+
+private func msk(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+    moscow.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute))!
+}
+
+func testGoldenHourDecisions() throws {
+    let golden = GoldenHour(hour: 14, minute: 0)
+    let five: TimeInterval = 5 * 3600
+    func decide(_ now: Date) -> GoldenHourPlanner.Decision {
+        GoldenHourPlanner.decide(golden: golden, windowDuration: five, now: now, calendar: moscow)
+    }
+    try expect(decide(msk(2, 3)) == .anchorNow, "03:00 window ends 08:00, before the 09:00 anchor: runs as usual")
+    try expect(decide(msk(2, 7, 30)) == .holdUntil(msk(2, 9)), "07:30 window would still run at 09:00: hold until 09:00")
+    try expect(decide(msk(2, 8)) == .holdUntil(msk(2, 9)), "08:00 would end 13:00, past 09:00: hold")
+    try expect(decide(msk(2, 9, 1)) == .anchorNow, "at the anchor time: anchor")
+    try expect(decide(msk(2, 11)) == .anchorNow, "late (Mac slept through 09:00): anchor right away")
+    let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: five, after: msk(2, 9, 1), calendar: moscow)
+    try expect(plan.anchor == msk(2, 9) && plan.reset == msk(2, 14), "anchor 09:00 → reset 14:00")
+    try expect(GoldenHourPlanner.nextGoldenTime(GoldenHour(hour: 0, minute: 30), after: msk(2, 23), calendar: moscow) == msk(3, 0, 30), "golden time across midnight")
+}
+
+/// Greedy chain of windows from an evening until the next golden time: every
+/// window that fits runs as usual, and the last one resets exactly at golden.
+private func simulateChain(golden: GoldenHour, window: TimeInterval, from start: Date) -> (resets: [Date], holds: Int) {
+    var now = start
+    var resets: [Date] = []
+    var holds = 0
+    let target = GoldenHourPlanner.nextGoldenTime(golden, after: start.addingTimeInterval(window), calendar: moscow)
+    while now < target {
+        switch GoldenHourPlanner.decide(golden: golden, windowDuration: window, now: now, calendar: moscow) {
+        case .anchorNow:
+            now = now.addingTimeInterval(window) // the window runs, then resets
+            resets.append(now)
+        case .holdUntil(let anchor):
+            holds += 1
+            now = anchor
+        }
+    }
+    return (resets, holds)
+}
+
+func testGoldenHourChainHitsTargetWithoutSkippingWindows() throws {
+    let golden = GoldenHour(hour: 14, minute: 0)
+    let five = simulateChain(golden: golden, window: 5 * 3600, from: msk(1, 15))
+    try expect(five.resets.last == msk(2, 14), "5 h windows: last reset lands on 14:00: \(five.resets)")
+    try expect(five.resets.count == 4 && five.holds == 1, "resets 20→01→06, one hold until 09:00, then 14:00 (\(five.resets.count) resets, \(five.holds) hold)")
+
+    // A future provider with 3-hour windows gets the same treatment.
+    let three = simulateChain(golden: golden, window: 3 * 3600, from: msk(1, 15))
+    try expect(three.resets.last == msk(2, 14), "3 h windows: last reset lands on 14:00: \(three.resets)")
+    try expect(three.holds == 1, "only the window that can't fit is held")
+}
+
+func testGoldenHourMissDetection() throws {
+    let golden = GoldenHour(hour: 14, minute: 0)
+    let five: TimeInterval = 5 * 3600
+    try expect(GoldenHourPlanner.isMissed(golden: golden, windowDuration: five, runningWindowResetsAt: msk(2, 12, 30), now: msk(2, 9, 30), calendar: moscow), "window running at 09:30 resetting 12:30: today is missed")
+    try expect(!GoldenHourPlanner.isMissed(golden: golden, windowDuration: five, runningWindowResetsAt: msk(2, 14, 5), now: msk(2, 9, 30), calendar: moscow), "resetting within 10 min of 14:00 counts as on target")
+    try expect(!GoldenHourPlanner.isMissed(golden: golden, windowDuration: five, runningWindowResetsAt: msk(2, 12, 30), now: msk(2, 8), calendar: moscow), "before the anchor time nothing is missed yet")
+    try expect(GoldenHour(minutesSinceMidnight: 14 * 60 + 5).label == "14:05" && GoldenHour(minutesSinceMidnight: -10).label == "23:50", "time-of-day storage")
+}
+
+func testAutoStartCapsFollowWindowLength() throws {
+    func starter(lastAttempt: Date) -> SessionAutoStarter {
+        let store = InMemoryAutoStartStore()
+        store.setState(AutoStartState(lastAttemptAt: lastAttempt, attemptsInLast24h: [lastAttempt]), for: .claude)
+        return SessionAutoStarter(store: store)
+    }
+    let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+    let now = t0.addingTimeInterval(2 * 3600 + 55 * 60)
+    func idle(_ duration: TimeInterval) -> UsageSnapshot {
+        UsageSnapshot(primary: UsageWindow(windowLabel: "w", remainingPercent: 100, resetAt: nil, windowDuration: duration), secondary: nil, fetchedAt: now)
+    }
+    try expect(starter(lastAttempt: t0).evaluate(provider: .claude, snapshot: idle(3 * 3600), now: now, highConfidence: true) == .start, "3 h window: the next one may start ~3 h later")
+    try expect(starter(lastAttempt: t0).evaluate(provider: .claude, snapshot: idle(5 * 3600), now: now, highConfidence: true) == .skip(reason: .cooldown), "5 h window keeps its ~5 h cooldown")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1712,6 +1796,10 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("golden hour decisions", testGoldenHourDecisions),
+    ("golden hour chain hits target without skipping windows", testGoldenHourChainHitsTargetWithoutSkippingWindows),
+    ("golden hour miss detection", testGoldenHourMissDetection),
+    ("auto-start caps follow window length", testAutoStartCapsFollowWindowLength),
     ("CLI update selection defaults", testCLIUpdateSelectionDefaults),
     ("OpenCode Free reset from real refusal", testOpenCodeFreeResetFromRealRefusal),
     ("OpenCode Free reads newest refusal from database", testOpenCodeFreeReadsNewestRefusalFromDatabase),

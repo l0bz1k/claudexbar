@@ -61,7 +61,7 @@ public enum UsageFormatter {
     /// shape) or a reset a full window-length away (Codex's idle shape) means
     /// not started; with an unknown duration we can't tell, so assume not —
     /// that keeps the long-standing "5h / 100%" look for full windows.
-    static func hasStarted(_ window: UsageWindow, now: Date) -> Bool {
+    public static func hasStarted(_ window: UsageWindow, now: Date) -> Bool {
         guard let resetAt = window.resetAt, let duration = window.windowDuration else { return false }
         return resetAt.timeIntervalSince(now) < duration - startedWindowTolerance
     }

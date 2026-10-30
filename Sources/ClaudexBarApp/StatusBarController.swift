@@ -49,6 +49,8 @@ final class StatusBarController: NSObject {
     // timer is armed for right after that boundary instead of waiting on the
     // polling-based idle heuristic to notice after the fact.
     private var scheduledResetCheckTimers: [ProviderID: Timer] = [:]
+    private var goldenAnchorTimers: [ProviderID: (at: Date, timer: Timer)] = [:]
+    private var goldenHoldLogged: [ProviderID: Date] = [:]
     private var scheduledResetCheckFor: [ProviderID: Date] = [:]
     private var pendingHighConfidenceCheck: Set<ProviderID> = []
     private var wakeObserver: NSObjectProtocol?
@@ -282,6 +284,8 @@ final class StatusBarController: NSObject {
             scheduleResetCheckIfNeeded(provider: provider, resetAt: resetAt)
         }
 
+        checkGoldenHourMissed(provider: provider, snapshot: snapshot)
+
         guard !autoStartInFlight.contains(provider) else { return }
 
         let highConfidence = pendingHighConfidenceCheck.remove(provider) != nil
@@ -299,9 +303,34 @@ final class StatusBarController: NSObject {
 
         guard case .start = decision else { return }
 
+        // AI Golden Hour: a window that wouldn't end before the golden-hour
+        // anchor time is held until then, so the reset lands on the golden
+        // time. Windows that fit earlier run as usual.
+        var goldenTarget: Date?
+        if let golden = activeGoldenHour, let duration = snapshot.primary?.windowDuration {
+            let now = Date()
+            let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: duration, after: now)
+            switch GoldenHourPlanner.decide(golden: golden, windowDuration: duration, now: now) {
+            case .holdUntil(let anchorAt):
+                scheduleGoldenAnchor(provider: provider, at: anchorAt)
+                if goldenHoldLogged[provider] != anchorAt {
+                    goldenHoldLogged[provider] = anchorAt
+                    logger.log(provider: provider, message: "golden hour: holding the anchor until \(Self.clock(anchorAt)) so the window resets at \(Self.clock(plan.reset))")
+                }
+                return
+            case .anchorNow:
+                if now >= plan.anchor { goldenTarget = plan.reset }
+            }
+        }
+
         autoStartInFlight.insert(provider)
         autoStarter.recordAttempt(provider: provider, now: Date())
-        logger.log(provider: provider, message: "auto-start: window looks idle, sending anchor message")
+        if let goldenTarget {
+            settings.setGoldenAnchoredFor(goldenTarget, for: provider)
+            logger.log(provider: provider, message: "golden hour: anchoring now for a reset at \(Self.clock(goldenTarget))")
+        } else {
+            logger.log(provider: provider, message: "auto-start: window looks idle, sending anchor message")
+        }
 
         Task { [weak self] in
             let result = await SessionAutoStartRunner.run(provider: provider)
@@ -337,6 +366,61 @@ final class StatusBarController: NSObject {
     /// about a minute instead of waiting for the periodic poll cadence plus
     /// the multi-sample idle debounce to notice after the fact. Re-arming is
     /// skipped if a timer for this same boundary is already scheduled.
+    private var activeGoldenHour: GoldenHour? {
+        settings.goldenHourEnabled ? settings.goldenHour : nil
+    }
+
+    private static func clock(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// Wakes the auto-start check exactly at the golden-hour anchor time (the
+    /// regular poll could be minutes late). During sleep it fires on wake.
+    private func scheduleGoldenAnchor(provider: ProviderID, at anchorAt: Date) {
+        if let existing = goldenAnchorTimers[provider], existing.at == anchorAt { return }
+        goldenAnchorTimers[provider]?.timer.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: max(1, anchorAt.timeIntervalSinceNow + 2), repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.goldenAnchorTimers[provider] = nil
+                self.performScheduledResetCheck(provider: provider)
+            }
+        }
+        goldenAnchorTimers[provider] = (anchorAt, timer)
+    }
+
+    private func resetGoldenHourSchedule() {
+        goldenAnchorTimers.values.forEach { $0.timer.invalidate() }
+        goldenAnchorTimers = [:]
+        goldenHoldLogged = [:]
+    }
+
+    /// At the anchor time, a window that's already running (you were working,
+    /// or it started earlier) won't reset at the golden time: say so once and
+    /// carry on with the regular schedule until the next day.
+    private func checkGoldenHourMissed(provider: ProviderID, snapshot: UsageSnapshot) {
+        let now = Date()
+        guard let golden = activeGoldenHour,
+              let window = snapshot.primary,
+              let duration = window.windowDuration,
+              let reset = window.resetAt,
+              UsageFormatter.hasStarted(window, now: now) else { return }
+        let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: duration, after: now)
+        guard now >= plan.anchor,
+              settings.goldenAnchoredFor(provider) != plan.reset,
+              settings.goldenMissNotifiedFor(provider) != plan.reset,
+              GoldenHourPlanner.isMissed(golden: golden, windowDuration: duration, runningWindowResetsAt: reset, now: now) else { return }
+        settings.setGoldenMissNotifiedFor(plan.reset, for: provider)
+        logger.log(provider: provider, message: "golden hour: \(Self.clock(plan.reset)) not reachable today — the running window resets at \(Self.clock(reset))")
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "AI Golden Hour"
+        content.body = "\(provider.displayName) can’t reset at \(Self.clock(plan.reset)) today: a window is already running and resets at \(Self.clock(reset)). Back on schedule tomorrow."
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "golden-miss-\(provider.rawValue)", content: content, trigger: nil))
+    }
+
     private func scheduleResetCheckIfNeeded(provider: ProviderID, resetAt: Date) {
         if let already = scheduledResetCheckFor[provider], abs(already.timeIntervalSince(resetAt)) < 5 {
             return
@@ -584,6 +668,25 @@ final class StatusBarController: NSObject {
         }
 
         submenu.addItem(.separator())
+        submenu.addItem(toggleItem(title: "AI Golden Hour", isOn: settings.goldenHourEnabled, action: #selector(toggleGoldenHour)))
+        submenu.addItem(NSMenuItem(
+            title: settings.goldenHour.map { "Golden Hour: \($0.label)…" } ?? "Set Golden Hour…",
+            action: #selector(chooseGoldenHour),
+            keyEquivalent: "",
+            target: self
+        ))
+        if let golden = activeGoldenHour {
+            for provider in ProviderID.allCases where settings.autoStartEnabled(for: provider) {
+                guard let duration = snapshots[provider]?.primary?.windowDuration else { continue }
+                let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: duration, after: Date())
+                let line = NSMenuItem(title: "\(provider.displayName): anchor \(Self.clock(plan.anchor)) → 100% at \(Self.clock(plan.reset))", action: nil, keyEquivalent: "")
+                line.isEnabled = false
+                line.indentationLevel = 1
+                submenu.addItem(line)
+            }
+        }
+
+        submenu.addItem(.separator())
         let note = NSMenuItem(
             title: "Sends one CLI message when idle. Off by default.",
             action: nil,
@@ -594,6 +697,54 @@ final class StatusBarController: NSObject {
 
         parent.submenu = submenu
         return parent
+    }
+
+    @objc private func toggleGoldenHour() {
+        if !settings.goldenHourEnabled, settings.goldenHour == nil {
+            chooseGoldenHour() // picking a time turns it on
+            return
+        }
+        settings.goldenHourEnabled.toggle()
+        if settings.goldenHourEnabled { enableAutoStartForGoldenHour() }
+        resetGoldenHourSchedule()
+        logger.log(provider: activeProvider, message: "golden hour: \(settings.goldenHourEnabled ? "on at \(settings.goldenHour?.label ?? "?")" : "off")")
+        refreshAll()
+    }
+
+    @objc private func chooseGoldenHour() {
+        NSApp.activate(ignoringOtherApps: true)
+        let picker = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 120, height: 26))
+        picker.datePickerStyle = .textFieldAndStepper
+        picker.datePickerElements = .hourMinute
+        // Suggest the earliest time that can shift the next reset: 5 h + 1 min.
+        picker.dateValue = Date().addingTimeInterval(5 * 60 * 60 + 60)
+
+        let alert = NSAlert()
+        alert.messageText = "AI Golden Hour"
+        alert.informativeText = "Every day at this time, session limits come back to 100%.\n\n"
+            + "A window resets a fixed time after it starts (5 h for Claude), so ClaudexBar anchors it that much earlier. "
+            + "Windows that fit before then still run as usual; if this time is less than a window away, it starts working tomorrow.\n\n"
+            + "Tip: a time on a 10-minute mark (14:00, 14:10) lands exactly; otherwise the reset comes a few minutes early."
+        alert.accessoryView = picker
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let components = Calendar.current.dateComponents([.hour, .minute], from: picker.dateValue)
+        settings.goldenHour = GoldenHour(hour: components.hour ?? 0, minute: components.minute ?? 0)
+        settings.goldenHourEnabled = true
+        enableAutoStartForGoldenHour()
+        resetGoldenHourSchedule()
+        logger.log(provider: activeProvider, message: "golden hour: on at \(settings.goldenHour?.label ?? "?")")
+        refreshAll()
+    }
+
+    /// Golden Hour works through the auto-start anchor; if no provider has it
+    /// on, turn it on for those with a session window.
+    private func enableAutoStartForGoldenHour() {
+        let eligible = ProviderID.allCases.filter { $0.isCodingCLI && snapshots[$0]?.primary?.windowDuration != nil }
+        guard !eligible.contains(where: { settings.autoStartEnabled(for: $0) }) else { return }
+        eligible.forEach { settings.setAutoStartEnabled(true, for: $0) }
     }
 
     @objc private func toggleAutoStart(_ sender: NSMenuItem) {
