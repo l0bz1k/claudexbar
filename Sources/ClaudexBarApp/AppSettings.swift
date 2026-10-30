@@ -144,6 +144,25 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: "notifiedUpdateVersion") }
     }
 
+    // MARK: CLI updates
+
+    /// Whether "Update Selected CLIs" and the daily auto-update may update this
+    /// provider's CLI. On by default for Codex and Claude Code; off for
+    /// opencode, whose releases include major-version jumps.
+    func cliUpdateAllowed(for provider: ProviderID) -> Bool {
+        guard provider.hasCLI else { return false }
+        let key = "cliUpdate.\(provider.rawValue)"
+        return defaults.object(forKey: key) == nil ? provider.isCodingCLI : defaults.bool(forKey: key)
+    }
+
+    func setCLIUpdateAllowed(_ allowed: Bool, for provider: ProviderID) {
+        defaults.set(allowed, forKey: "cliUpdate.\(provider.rawValue)")
+    }
+
+    var cliUpdateProviders: [ProviderID] {
+        ProviderID.allCases.filter { cliUpdateAllowed(for: $0) }
+    }
+
     func autoStartEnabled(for provider: ProviderID) -> Bool {
         switch provider {
         case .claude: return autoStartClaudeEnabled

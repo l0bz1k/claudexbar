@@ -1052,6 +1052,17 @@ func testOpencodeCLIVersionAndCapabilities() throws {
     try expect(CLIVersionParser.latestVersion(provider: .opencodeFree, from: release) == "2.2.3", "opencode latest version from its GitHub release")
 }
 
+// MARK: - v0.6.1: CLI update selection
+
+func testCLIUpdateSelectionDefaults() throws {
+    let cliProviders = ProviderID.allCases.filter(\.hasCLI)
+    try expect(cliProviders == [.codex, .claude, .opencodeFree], "three CLIs can be updated: \(cliProviders)")
+    // Defaults: Codex and Claude Code on, opencode off (major-version jumps).
+    let defaultsOn = cliProviders.filter(\.isCodingCLI)
+    try expect(defaultsOn == [.codex, .claude], "auto-update defaults to Codex and Claude Code only")
+    try expect(ProviderID.opencodeFree.cliName == "opencode" && ProviderID.claude.cliName == "Claude Code", "CLI names in the menu")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1701,6 +1712,7 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("CLI update selection defaults", testCLIUpdateSelectionDefaults),
     ("OpenCode Free reset from real refusal", testOpenCodeFreeResetFromRealRefusal),
     ("OpenCode Free reads newest refusal from database", testOpenCodeFreeReadsNewestRefusalFromDatabase),
     ("opencode CLI version and capabilities", testOpencodeCLIVersionAndCapabilities),

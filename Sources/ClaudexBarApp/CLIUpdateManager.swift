@@ -53,21 +53,22 @@ actor CLIUpdateManager {
         return await CLIUpdateSnapshot(installed: installed, latest: latest)
     }
 
-    func updateAll() async -> [CLICommandResult] {
+    /// Updates the given CLIs (the user's selection in "CLI Updates").
+    func updateAll(providers: [ProviderID]) async -> [CLICommandResult] {
         guard !updateInProgress else { return [] }
         updateInProgress = true
         defer { updateInProgress = false }
 
         var results: [CLICommandResult] = []
-        // opencode's version is shown but it is never auto-updated: its
-        // releases include major-version jumps (1.x → 2.x), which should be
-        // the user's decision, not a background job's.
-        for provider in ProviderID.allCases where provider.isCodingCLI {
+        for provider in providers where provider.hasCLI {
             guard let executable = CLIExecutableLocator.executable(for: provider) else {
                 results.append(CLICommandResult(provider: provider, exitCode: 127))
                 continue
             }
-            results.append(await run(executable: executable, arguments: ["update"], provider: provider))
+            // opencode's self-updater is `upgrade` (it detects brew/npm/curl
+            // installs itself); Codex and Claude Code use `update`.
+            let arguments = provider == .opencodeFree ? ["upgrade"] : ["update"]
+            results.append(await run(executable: executable, arguments: arguments, provider: provider))
         }
         return results
     }

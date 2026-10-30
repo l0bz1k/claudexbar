@@ -2,7 +2,7 @@ import AppKit
 
 if CommandLine.arguments.contains("--update-clis") {
     Task {
-        let results = await CLIUpdateManager.shared.updateAll()
+        let results = await CLIUpdateManager.shared.updateAll(providers: AppSettings().cliUpdateProviders)
         SanitizedLogger.shared.flush()
         exit(results.allSatisfy(\.succeeded) ? 0 : 1)
     }

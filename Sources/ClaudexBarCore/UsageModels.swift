@@ -31,6 +31,11 @@ public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
         isCodingCLI || self == .opencodeFree
     }
 
+    /// Name of the CLI itself, for the "CLI Updates" menu.
+    public var cliName: String {
+        self == .opencodeFree ? "opencode" : displayName
+    }
+
     /// Off unless the user turns them on, so existing setups don't start
     /// showing (or erroring on) providers they never asked for.
     public var enabledByDefault: Bool { isCodingCLI }

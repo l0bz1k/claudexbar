@@ -3,6 +3,17 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — 2026-10-30
+
+### Changed
+- **Choose which CLIs get updated.** "CLI Updates" now lists Codex, Claude
+  Code and opencode with checkboxes; both "Update Selected CLIs Now" (renamed
+  from "Update Claude & Codex Now") and the daily auto-update only touch the
+  checked ones. Codex and Claude Code are checked by default; opencode is not —
+  its releases include major-version jumps. opencode updates with its own
+  `opencode upgrade`, which detects brew/npm/curl installs.
+- The update result window lists only the CLIs that were actually updated.
+
 ## [0.6.0] — 2026-10-30
 
 ### Added

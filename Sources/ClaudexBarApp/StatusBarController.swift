@@ -649,13 +649,30 @@ final class StatusBarController: NSObject {
             action: #selector(toggleAutomaticCLIUpdates)
         )
         submenu.addItem(automatic)
+        submenu.addItem(.separator())
 
-        let updateTitle = cliUpdateInProgress ? "Updating Claude & Codex…" : "Update Claude & Codex Now"
+        // Which CLIs "Update Selected" and the daily auto-update may touch.
+        let header = NSMenuItem(title: "Update these CLIs:", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        submenu.addItem(header)
+        for provider in ProviderID.allCases where provider.hasCLI {
+            let item = NSMenuItem(title: provider.cliName, action: #selector(toggleCLIUpdateAllowed(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = provider.rawValue
+            item.state = settings.cliUpdateAllowed(for: provider) ? .on : .off
+            item.indentationLevel = 1
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+
+        let selected = settings.cliUpdateProviders
+        let updateTitle = cliUpdateInProgress ? "Updating Selected CLIs…" : "Update Selected CLIs Now"
         let update = NSMenuItem(title: updateTitle, action: #selector(updateCLIsManually), keyEquivalent: "")
         update.target = self
         update.isEnabled = !cliUpdateInProgress
             && !cliUpdateCheckInProgress
-            && cliUpdateSnapshot?.installed.isEmpty == false
+            && !selected.isEmpty
+            && selected.contains { cliUpdateSnapshot?.installed[$0] != nil }
         submenu.addItem(update)
 
         parent.submenu = submenu
@@ -664,18 +681,18 @@ final class StatusBarController: NSObject {
 
     private func cliVersionLabel(_ provider: ProviderID) -> String {
         guard let snapshot = cliUpdateSnapshot else {
-            return "\(provider.displayName) · checking…"
+            return "\(provider.cliName) · checking…"
         }
         guard let installed = snapshot.installed[provider] else {
-            return "\(provider.displayName) · not found"
+            return "\(provider.cliName) · not found"
         }
         guard let latest = snapshot.latest[provider] else {
-            return "\(provider.displayName) \(installed) · check unavailable"
+            return "\(provider.cliName) \(installed) · check unavailable"
         }
         if snapshot.hasUpdate(for: provider) {
-            return "\(provider.displayName) \(installed) → \(latest)"
+            return "\(provider.cliName) \(installed) → \(latest)"
         }
-        return "\(provider.displayName) \(installed) · current"
+        return "\(provider.cliName) \(installed) · current"
     }
 
     private func toggleItem(title: String, isOn: Bool, action: Selector) -> NSMenuItem {
@@ -841,11 +858,18 @@ final class StatusBarController: NSObject {
         }
     }
 
+    @objc private func toggleCLIUpdateAllowed(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let provider = ProviderID(rawValue: raw) else { return }
+        settings.setCLIUpdateAllowed(!settings.cliUpdateAllowed(for: provider), for: provider)
+    }
+
     @objc private func updateCLIsManually() {
         guard !cliUpdateInProgress, !cliUpdateCheckInProgress else { return }
         cliUpdateInProgress = true
+        let selected = settings.cliUpdateProviders
         Task { [weak self] in
-            let results = await CLIUpdateManager.shared.updateAll()
+            let results = await CLIUpdateManager.shared.updateAll(providers: selected)
             let snapshot = await CLIUpdateManager.shared.snapshot()
             guard let self else { return }
             await MainActor.run {
@@ -861,10 +885,9 @@ final class StatusBarController: NSObject {
         let failures = results.filter { !$0.succeeded }
         let alert = NSAlert()
         alert.messageText = failures.isEmpty ? "CLI update complete" : "Some CLI updates failed"
-        alert.informativeText = ProviderID.allCases.map { provider in
-            let result = results.first { $0.provider == provider }
-            let outcome = result?.succeeded == true ? "updated" : "failed"
-            return "\(provider.displayName): \(outcome)\n\(cliVersionLabel(provider))"
+        alert.informativeText = results.map { result in
+            let outcome = result.succeeded ? "updated" : "failed"
+            return "\(result.provider.cliName): \(outcome)\n\(cliVersionLabel(result.provider))"
         }.joined(separator: "\n\n")
         alert.alertStyle = failures.isEmpty ? .informational : .warning
         alert.addButton(withTitle: "OK")
