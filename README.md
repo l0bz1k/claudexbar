@@ -31,6 +31,8 @@ This fork exists to fix a handful of real issues hit running the original daily 
 - **Used or remaining %, pace warning, tooltip, diagnostics.** Optionally show *used* % like the Claude/ChatGPT apps; a ▲ marks a window you're on pace to exhaust before it resets; hovering explains every number; **Copy Diagnostics** produces a redacted report for bug reports.
 - **"Launch at Login" no longer quits the app when unchecked**, plus a round of reliability fixes from a code review (no on-disk HTTP cache, timeouts on every CLI call, log rotation, refresh on wake).
 
+- **OpenRouter and OpenCode Go** limits alongside Codex and Claude Code, using the API key opencode already stores (opt-in in the menu).
+
 Full details, including the two real bugs found and fixed along the way, are in [CHANGELOG.md](CHANGELOG.md#020--2026-09-26).
 
 ## Screenshots

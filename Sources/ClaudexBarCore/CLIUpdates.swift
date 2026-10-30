@@ -44,6 +44,8 @@ public enum CLIVersionParser {
         case .codex:
             guard let version = root["version"] as? String else { return nil }
             return semanticVersion(in: version)
+        case .openrouter, .opencodeGo:
+            return nil // API-key providers: no CLI of their own to update
         }
     }
 }
@@ -57,7 +59,7 @@ public struct CLILatestVersionChecker: Sendable {
 
     public func fetchLatestVersions() async -> [ProviderID: String] {
         await withTaskGroup(of: (ProviderID, String?).self) { group in
-            for provider in ProviderID.allCases {
+            for provider in ProviderID.allCases where provider.isCodingCLI {
                 group.addTask {
                     (provider, await latestVersion(for: provider))
                 }
@@ -78,6 +80,8 @@ public struct CLILatestVersionChecker: Sendable {
             urlString = "https://api.github.com/repos/anthropics/claude-code/releases/latest"
         case .codex:
             urlString = "https://registry.npmjs.org/%40openai%2Fcodex/latest"
+        case .openrouter, .opencodeGo:
+            return nil
         }
         guard let url = URL(string: urlString) else { return nil }
 

@@ -916,6 +916,87 @@ func testDeadOwnSessionStillFallsBackLazily() throws {
     try expect(reader.claudeCodeReads == 1, "Claude Code's credential is read when it's actually needed")
 }
 
+// MARK: - v0.5.0: OpenRouter and OpenCode Go
+
+func testOpenRouterParsesQuotaAndCredits() throws {
+    // Shape of a real /api/v1/key + /api/v1/credits response (2026-10-30).
+    let key = Data(#"{"data":{"limit":null,"limit_remaining":null,"usage":0.0009255,"is_free_tier":false,"free_model_daily_requests":{"used":0,"limit":1000,"remaining":1000}}}"#.utf8)
+    let credits = Data(#"{"data":{"total_credits":10,"total_usage":0.0009255}}"#.utf8)
+    let now = ISO8601DateFormatter().date(from: "2026-10-30T20:00:00Z")!
+    let snapshot = try OpenRouterProvider.parseUsage(key: key, credits: credits, now: now)
+    let quota = try expectNonNil(snapshot.primary, "free-model quota window")
+    try expect(quota.remainingPercent == 100 && quota.windowLabel == "1d", "1000/1000 free requests left")
+    try expect(quota.resetAt == ISO8601DateFormatter().date(from: "2026-10-31T00:00:00Z"), "free quota resets at 00:00 UTC")
+    let balance = try expectNonNil(snapshot.secondary, "credit balance window")
+    try expect(balance.windowLabel == "$10.00" && balance.remainingPercent == 99, "balance label and share: \(balance.windowLabel) \(balance.remainingPercent)")
+}
+
+func testOpenRouterPrefersKeyLimitAndPartialQuota() throws {
+    let key = Data(#"{"data":{"limit":20,"limit_remaining":5,"usage":15,"free_model_daily_requests":{"used":30,"limit":50,"remaining":20}}}"#.utf8)
+    let snapshot = try OpenRouterProvider.parseUsage(key: key, credits: nil, now: Date())
+    try expect(snapshot.primary?.remainingPercent == 40, "20 of 50 free requests left")
+    try expect(snapshot.secondary?.remainingPercent == 25 && snapshot.secondary?.windowLabel == "$5.00", "a key spending limit wins over the account balance")
+    try expect((try? OpenRouterProvider.parseUsage(key: Data("{}".utf8), credits: nil, now: Date())) == nil, "garbage is a decoding error")
+}
+
+func testOpenCodeGoParsesDocumentedShape() throws {
+    let body = Data(#"""
+    {"usage":{"rolling":{"percent":12,"resetsAt":"2026-10-30T22:00:00Z"},
+              "weekly":{"percent":8,"resetsAt":null},
+              "monthly":{"percent":35,"resetsAt":"2026-11-01T00:00:00Z"}}}
+    """#.utf8)
+    let snapshot = try OpenCodeGoProvider.parseUsage(body, now: Date())
+    try expect(snapshot.primary?.remainingPercent == 88 && snapshot.primary?.windowLabel == "5h", "rolling 5h window, percent is the share used")
+    try expect(snapshot.secondary?.windowLabel == "30d" && snapshot.secondary?.remainingPercent == 65, "the tighter of weekly/monthly takes the second column")
+    try expect(snapshot.extraWindows.map(\.windowLabel) == ["7d"], "the other long window goes to the tooltip")
+    try expect(snapshot.primary?.resetAt == ISO8601DateFormatter().date(from: "2026-10-30T22:00:00Z"), "reset parsed")
+}
+
+func testOpenCodeGoToleratesAlternateShapes() throws {
+    let capitalised = Data(#"{"Usage":{"rolling":{"percent":50,"resetsAt":null},"weekly":{"percent":10,"resetsAt":null}}}"#.utf8)
+    let a = try OpenCodeGoProvider.parseUsage(capitalised, now: Date())
+    try expect(a.primary?.remainingPercent == 50 && a.secondary?.windowLabel == "7d", "capitalised root key")
+
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    let flat = Data(#"{"rollingUsage":{"percent":20,"resetInSec":3600},"monthlyUsage":{"usagePercent":4}}"#.utf8)
+    let b = try OpenCodeGoProvider.parseUsage(flat, now: now)
+    try expect(b.primary?.resetAt == now.addingTimeInterval(3600), "second-based reset field")
+    try expect(b.secondary?.remainingPercent == 96 && b.secondary?.windowLabel == "30d", "flat *Usage keys")
+    try expect((try? OpenCodeGoProvider.parseUsage(Data(#"{"usage":{}}"#.utf8), now: now)) == nil, "no windows is a decoding error")
+}
+
+func testOpencodeKeyReaderAndDefaults() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-oc-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let auth = dir.appendingPathComponent("auth.json")
+    try Data(#"{"openrouter":{"type":"api","key":" sk-or-file "}}"#.utf8).write(to: auth)
+
+    let fromFile = OpencodeKeyReader(authURL: auth, environment: [:])
+    try expect(fromFile.key(provider: "openrouter", environmentVariable: "OPENROUTER_API_KEY") == "sk-or-file", "key read from opencode's auth.json, trimmed")
+    try expect(fromFile.key(provider: "opencode-go", environmentVariable: "OPENCODE_API_KEY") == nil, "absent provider -> nil")
+    let fromEnv = OpencodeKeyReader(authURL: auth, environment: ["OPENROUTER_API_KEY": "sk-or-env"])
+    try expect(fromEnv.key(provider: "openrouter", environmentVariable: "OPENROUTER_API_KEY") == "sk-or-env", "environment variable wins")
+
+    try expect(!ProviderID.openrouter.enabledByDefault && !ProviderID.opencodeGo.enabledByDefault, "API-key providers are opt-in")
+    try expect(ProviderID(rawValue: "opencode-go") == .opencodeGo, "stable raw value for settings")
+}
+
+func testOpenCodeGoHTTPOutcomes() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-oc-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let auth = dir.appendingPathComponent("auth.json")
+    try Data(#"{"opencode-go":{"type":"api","key":"sk-go"}}"#.utf8).write(to: auth)
+    let reader = OpencodeKeyReader(authURL: auth, environment: [:])
+
+    let unauthorized = OpenCodeGoProvider(keyReader: reader, httpClient: StaticHTTPClient(status: 401, body: Data()))
+    guard case .failure(.authExpired) = runBlocking({ await unauthorized.fetchUsage() }) else { throw TestFailure(description: "401 -> authExpired") }
+
+    let noKey = OpenCodeGoProvider(keyReader: OpencodeKeyReader(authURL: dir.appendingPathComponent("none.json"), environment: [:]), httpClient: StaticHTTPClient(status: 200, body: Data()))
+    guard case .failure(.missingAuth) = runBlocking({ await noKey.fetchUsage() }) else { throw TestFailure(description: "no key -> missingAuth") }
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1565,6 +1646,12 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("OpenRouter parses quota and credits", testOpenRouterParsesQuotaAndCredits),
+    ("OpenRouter prefers key limit; partial quota", testOpenRouterPrefersKeyLimitAndPartialQuota),
+    ("OpenCode Go parses documented shape", testOpenCodeGoParsesDocumentedShape),
+    ("OpenCode Go tolerates alternate shapes", testOpenCodeGoToleratesAlternateShapes),
+    ("opencode key reader and defaults", testOpencodeKeyReaderAndDefaults),
+    ("OpenCode Go HTTP outcomes", testOpenCodeGoHTTPOutcomes),
     ("working own session never reads Claude Code keychain", testWorkingOwnSessionNeverReadsClaudeCodeKeychain),
     ("dead own session still falls back lazily", testDeadOwnSessionStillFallsBackLazily),
     ("edge block is recognised, with IP", testEdgeBlockIsRecognisedWithIP),

@@ -3,13 +3,29 @@ import Foundation
 public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
     case codex
     case claude
+    case openrouter
+    case opencodeGo = "opencode-go"
 
     public var displayName: String {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude Code"
+        case .openrouter: return "OpenRouter"
+        case .opencodeGo: return "OpenCode Go"
         }
     }
+
+    /// Providers backed by a coding CLI with its own login and rolling
+    /// session windows (Codex, Claude Code). Only these get CLI updates,
+    /// "Auto-start 5h Session" and in-app re-authentication; the API-key
+    /// providers (OpenRouter, OpenCode Go) are read with a key opencode stores.
+    public var isCodingCLI: Bool {
+        self == .codex || self == .claude
+    }
+
+    /// Off unless the user turns them on, so existing setups don't start
+    /// showing (or erroring on) providers they never asked for.
+    public var enabledByDefault: Bool { isCodingCLI }
 }
 
 public struct ShellCommand: Equatable, Sendable {
@@ -44,11 +60,15 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let primary: UsageWindow?
     public let secondary: UsageWindow?
     public let fetchedAt: Date
+    /// Windows that don't fit the two tray columns (e.g. OpenCode Go's third
+    /// limit). Shown in the tooltip and diagnostics only.
+    public let extraWindows: [UsageWindow]
 
-    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date) {
+    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = []) {
         self.primary = primary
         self.secondary = secondary
         self.fetchedAt = fetchedAt
+        self.extraWindows = extraWindows
     }
 }
 
@@ -59,12 +79,16 @@ public struct UsageWindow: Equatable, Sendable {
     /// Full length of the window (e.g. 5h, 7d, 30d), when the provider tells
     /// us. Needed to know how much of the window has *elapsed*, for pace.
     public let windowDuration: TimeInterval?
+    /// Human name for tooltips ("Free-model requests today"); nil means the
+    /// generic session/weekly naming.
+    public let title: String?
 
-    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil) {
+    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil, title: String? = nil) {
         self.windowLabel = windowLabel
         self.remainingPercent = max(0, min(100, remainingPercent))
         self.resetAt = resetAt
         self.windowDuration = windowDuration
+        self.title = title
     }
 
     public var usedPercent: Int { 100 - remainingPercent }

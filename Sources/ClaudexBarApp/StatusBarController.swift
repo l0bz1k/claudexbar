@@ -14,7 +14,9 @@ final class StatusBarController: NSObject {
         // credential stays valid without re-login.
         .claude: ClaudeProvider(persistRefreshed: { credentials in
             try? ClaudeCredentialStore().save(credentials)
-        })
+        }),
+        .openrouter: OpenRouterProvider(),
+        .opencodeGo: OpenCodeGoProvider()
     ]
 
     private var snapshots: [ProviderID: UsageSnapshot] = [:]
@@ -404,11 +406,14 @@ final class StatusBarController: NSObject {
         let side = settings.percentMode == .used ? "used" : "left"
         var lines = [provider.displayName]
         let secondaryName = ["7d", "1w"].contains(snapshot.secondary?.windowLabel ?? "") ? "Weekly" : "Quota"
-        for (name, window) in [("Session", snapshot.primary), (secondaryName, snapshot.secondary)] {
+        let windows: [(String, UsageWindow?)] = [("Session", snapshot.primary), (secondaryName, snapshot.secondary)]
+            + snapshot.extraWindows.map { ("", $0) }
+        for (fallbackName, window) in windows {
             guard let window else { continue }
+            let name = window.title ?? "\(fallbackName) (\(window.windowLabel))"
             let percent = settings.percentMode == .used ? window.usedPercent : window.remainingPercent
             let reset = window.resetAt.map { " · resets in \(UsageFormatter.resetLabel(resetAt: $0, now: now))" } ?? ""
-            lines.append("\(name) (\(window.windowLabel)): \(percent)% \(side)\(reset)")
+            lines.append("\(name): \(percent)% \(side)\(reset)")
             if let pace = UsageFormatter.pace(for: window, now: now) {
                 lines.append("   " + UsageFormatter.paceSummary(pace, windowName: name, now: now))
             }
@@ -428,8 +433,7 @@ final class StatusBarController: NSObject {
             menu.addItem(item)
             menu.addItem(.separator())
         }
-        appendProviderRow(to: menu, provider: .codex)
-        appendProviderRow(to: menu, provider: .claude)
+        ProviderID.allCases.forEach { appendProviderRow(to: menu, provider: $0) }
         menu.addItem(.separator())
 
         // "Refresh All" by default; holding Option swaps it for "Open Logs…"
@@ -710,6 +714,10 @@ final class StatusBarController: NSObject {
         switch provider {
         case .codex: reauthCodex()
         case .claude: reauthClaude()
+        case .openrouter, .opencodeGo:
+            // The key lives in opencode's auth store; `opencode auth login`
+            // (re)adds it. The next poll picks it up.
+            runInTerminal(providers[provider]?.reauthCommand())
         }
     }
 

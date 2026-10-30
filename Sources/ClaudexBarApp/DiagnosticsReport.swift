@@ -40,7 +40,7 @@ enum DiagnosticsReport {
         lines.append("refresh: \(Int(settings.refreshInterval))s; percent: \(settings.percentMode.rawValue); pace warning session/long: \(settings.paceWarningSession)/\(settings.paceWarningLong); smart switch: \(settings.smartSwitchEnabled)")
         lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled)")
 
-        for provider in [ProviderID.claude, .codex] {
+        for provider in ProviderID.allCases where settings.enabledProviders.contains(provider) || provider.isCodingCLI {
             lines.append("")
             lines.append("## \(provider.displayName)")
             lines.append("cli: \(CLIExecutableLocator.executable(for: provider)?.path ?? "not found")")

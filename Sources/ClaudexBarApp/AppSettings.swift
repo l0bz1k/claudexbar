@@ -26,7 +26,7 @@ final class AppSettings {
     var enabledProviders: [ProviderID] {
         get {
             guard let rawValues = defaults.array(forKey: "enabledProviders") as? [String] else {
-                return ProviderID.allCases
+                return ProviderID.allCases.filter(\.enabledByDefault)
             }
             let providers = rawValues.compactMap(ProviderID.init(rawValue:))
             return ProviderID.allCases.filter { providers.contains($0) }
@@ -148,6 +148,7 @@ final class AppSettings {
         switch provider {
         case .claude: return autoStartClaudeEnabled
         case .codex: return autoStartCodexEnabled
+        case .openrouter, .opencodeGo: return false // no session window to anchor
         }
     }
 
@@ -155,6 +156,7 @@ final class AppSettings {
         switch provider {
         case .claude: autoStartClaudeEnabled = enabled
         case .codex: autoStartCodexEnabled = enabled
+        case .openrouter, .opencodeGo: break
         }
     }
 }

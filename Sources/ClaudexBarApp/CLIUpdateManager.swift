@@ -13,6 +13,8 @@ enum CLIExecutableLocator {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates: [String]
         switch provider {
+        case .openrouter, .opencodeGo:
+            return nil // read with an API key; no CLI of their own
         case .claude:
             candidates = [
                 "\(home)/.local/bin/claude",

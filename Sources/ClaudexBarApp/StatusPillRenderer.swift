@@ -42,13 +42,13 @@ enum StatusPillRenderer {
     ) -> NSImage {
         let primary = UsageFormatter.metricDisplay(
             for: snapshot.primary,
-            unavailableLabel: "5h",
+            unavailableLabel: provider == .openrouter ? "1d" : "5h",
             now: now,
             mode: mode
         )
         let secondary = UsageFormatter.metricDisplay(
             for: snapshot.secondary,
-            unavailableLabel: provider == .codex ? "1w" : "7d",
+            unavailableLabel: provider == .codex ? "1w" : provider == .openrouter ? "$" : "7d",
             now: now,
             mode: mode
         )

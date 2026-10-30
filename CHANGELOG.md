@@ -3,6 +3,28 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-10-30
+
+### Added
+- **OpenRouter** provider: the free-model daily request quota (resets at
+  00:00 UTC) and the prepaid credit balance — or the key's own spending limit
+  when one is set — from `openrouter.ai/api/v1/key` and `/credits`.
+- **OpenCode Go** provider: the subscription's rolling 5-hour, weekly and
+  monthly limits from the official `opencode.ai/zen/go/v1/usage` endpoint.
+  The tray shows the 5-hour window plus whichever of weekly/monthly is closer
+  to running out; all three are in the tooltip.
+- Both read the API key opencode already stores (`~/.local/share/opencode/
+  auth.json`, or `OPENROUTER_API_KEY` / `OPENCODE_API_KEY`), so there's nothing
+  extra to configure. They're off by default: turn them on in the menu.
+  ⌥ → "Re-auth" runs `opencode auth login`.
+- Tooltips use each window's own name ("Free-model requests today", "Credit
+  balance", "Monthly limit").
+
+### Notes
+- The OpenCode Go response format is taken from its documentation and
+  community clients and hasn't been verified against a live Go account yet;
+  the parser accepts the documented and alternate field layouts.
+
 ## [0.4.3] — 2026-10-29
 
 ### Fixed
