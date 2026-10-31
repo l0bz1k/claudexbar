@@ -3,6 +3,22 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-10-31
+
+### Changed
+- Providers are listed alphabetically in every menu.
+- A provider that's switched off shows "off" instead of "wait" (it isn't
+  polled at all, so "wait" looked like it was loading).
+- The menu keeps showing a provider's last known figures through a transient
+  error (rate limit, network blip), like the tray already did, instead of
+  flashing "net".
+
+### Fixed
+- **Polling no longer hammers a rate-limited endpoint.** After an HTTP 429 the
+  next poll of that provider waits 2, 4, 8… minutes (capped at 10), and a
+  success resets it; "Refresh All" always goes out. Anthropic's usage
+  endpoint had started refusing about every other per-minute poll.
+
 ## [0.7.0] — 2026-10-31
 
 ### Added

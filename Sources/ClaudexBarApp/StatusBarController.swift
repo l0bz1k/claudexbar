@@ -37,6 +37,10 @@ final class StatusBarController: NSObject {
     private var smartSwitchEngine: SmartProviderSwitchEngine?
     private var usageDeltaTracker = UsageDeltaTracker()
     private var refreshesInFlight: Set<ProviderID> = []
+    /// After an HTTP 429, skip this provider's polls until then (growing with
+    /// consecutive 429s, reset by a success). Polling a rate-limited endpoint
+    /// every minute only produces more 429s.
+    private var rateLimitBackoff: [ProviderID: (until: Date, strikes: Int)] = [:]
     private var presentedMenu: NSMenu?
     private var cliUpdateSnapshot: CLIUpdateSnapshot?
     private var cliUpdateCheckInProgress = false
@@ -222,6 +226,7 @@ final class StatusBarController: NSObject {
     /// a refresh was triggered (the data itself may be unchanged), then refetch.
     @objc private func refreshAllManually() {
         pulseRefreshIndicator()
+        rateLimitBackoff = [:] // an explicit refresh always goes out
         refreshAll()
     }
 
@@ -241,6 +246,7 @@ final class StatusBarController: NSObject {
     private func refresh(provider: ProviderID, notify: Bool = true) {
         guard let usageProvider = providers[provider] else { return }
         guard !refreshesInFlight.contains(provider) else { return }
+        if let backoff = rateLimitBackoff[provider], Date() < backoff.until { return }
         refreshesInFlight.insert(provider)
         Task {
             let result = await usageProvider.fetchUsage()
@@ -250,12 +256,20 @@ final class StatusBarController: NSObject {
                 case .success(let snapshot):
                     snapshots[provider] = snapshot
                     errors[provider] = nil
+                    rateLimitBackoff[provider] = nil
                     usageDeltaTracker.record(provider: provider, snapshot: snapshot)
                     logger.log(provider: provider, message: "usage ok")
                     handleAutoStart(provider: provider, snapshot: snapshot)
                 case .failure(let error):
                     errors[provider] = error
-                    logger.log(provider: provider, message: error.sanitizedDescription)
+                    var message = error.sanitizedDescription
+                    if case .rateLimited = error {
+                        let strikes = (rateLimitBackoff[provider]?.strikes ?? 0) + 1
+                        let delay = min(10 * 60, settings.refreshInterval * pow(2, Double(strikes)))
+                        rateLimitBackoff[provider] = (Date().addingTimeInterval(delay), strikes)
+                        message += " — next try in \(Int(delay / 60)) min"
+                    }
+                    logger.log(provider: provider, message: message)
                 }
                 updateImage()
                 if notify {
@@ -518,9 +532,9 @@ final class StatusBarController: NSObject {
             menu.addItem(item)
             menu.addItem(.separator())
         }
-        let rows = ProviderID.allCases.map { (label: $0.displayName, version: providerVersionBadge($0), hint: providerStatusHint($0)) }
+        let rows = ProviderID.displayOrder.map { (label: $0.displayName, version: providerVersionBadge($0), hint: providerStatusHint($0)) }
         let layout = ProviderRowLayout.make(rows: rows)
-        ProviderID.allCases.forEach { appendProviderRow(to: menu, provider: $0, layout: layout) }
+        ProviderID.displayOrder.forEach { appendProviderRow(to: menu, provider: $0, layout: layout) }
         menu.addItem(.separator())
 
         // "Refresh All" by default; holding Option swaps it for "Open Logs…"
@@ -588,7 +602,12 @@ final class StatusBarController: NSObject {
         if let override = statusOverrides[provider] {
             return .status(override)
         }
-        if let snapshot = snapshots[provider], errors[provider] == nil {
+        guard providerSelection.enabledProviders.contains(provider) else {
+            return .status("off") // not polled at all — "wait" read as loading
+        }
+        // Like the tray: a transient error (rate limit, network blip) keeps
+        // the last known figures instead of flashing a status word.
+        if let snapshot = snapshots[provider], errors[provider] == nil || errors[provider]!.isTransient {
             let first = UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)
             if snapshot.secondary == nil, provider == .opencodeFree {
                 return .figure(first) // a single window: no second column
@@ -640,7 +659,7 @@ final class StatusBarController: NSObject {
         let parent = NSMenuItem(title: "Auto-start 5h Session", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
-        [ProviderID.codex, ProviderID.claude].forEach { provider in
+        ProviderID.displayOrder.filter(\.isCodingCLI).forEach { provider in
             let state = autoStarter.currentState(provider: provider)
             let enabled = settings.autoStartEnabled(for: provider)
             // The mechanism only ever targets the primary/short window (see
@@ -676,7 +695,7 @@ final class StatusBarController: NSObject {
             target: self
         ))
         if let golden = activeGoldenHour {
-            for provider in ProviderID.allCases where settings.autoStartEnabled(for: provider) {
+            for provider in ProviderID.displayOrder where settings.autoStartEnabled(for: provider) {
                 guard let duration = snapshots[provider]?.primary?.windowDuration else { continue }
                 let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: duration, after: Date())
                 let line = NSMenuItem(title: "\(provider.displayName): anchor \(Self.clock(plan.anchor)) → 100% at \(Self.clock(plan.reset))", action: nil, keyEquivalent: "")
@@ -806,7 +825,7 @@ final class StatusBarController: NSObject {
         let header = NSMenuItem(title: "Update these CLIs:", action: nil, keyEquivalent: "")
         header.isEnabled = false
         submenu.addItem(header)
-        for provider in ProviderID.allCases where provider.hasCLI {
+        for provider in ProviderID.displayOrder where provider.hasCLI {
             let item = NSMenuItem(title: provider.cliName, action: #selector(toggleCLIUpdateAllowed(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = provider.rawValue

@@ -31,6 +31,11 @@ public enum ProviderID: String, CaseIterable, Codable, Hashable, Sendable {
         isCodingCLI || self == .opencodeFree
     }
 
+    /// Providers in the order menus list them: alphabetical by name.
+    public static var displayOrder: [ProviderID] {
+        allCases.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+
     /// Name of the CLI itself, for the "CLI Updates" menu.
     public var cliName: String {
         self == .opencodeFree ? "opencode" : displayName

@@ -1147,6 +1147,11 @@ func testAutoStartCapsFollowWindowLength() throws {
     try expect(starter(lastAttempt: t0).evaluate(provider: .claude, snapshot: idle(5 * 3600), now: now, highConfidence: true) == .skip(reason: .cooldown), "5 h window keeps its ~5 h cooldown")
 }
 
+func testProvidersListAlphabetically() throws {
+    try expect(ProviderID.displayOrder == [.claude, .codex, .opencodeFree, .opencodeGo, .openrouter],
+               "menus list providers alphabetically: \(ProviderID.displayOrder.map(\.displayName))")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1796,6 +1801,7 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("providers list alphabetically", testProvidersListAlphabetically),
     ("golden hour decisions", testGoldenHourDecisions),
     ("golden hour chain hits target without skipping windows", testGoldenHourChainHitsTargetWithoutSkippingWindows),
     ("golden hour miss detection", testGoldenHourMissDetection),

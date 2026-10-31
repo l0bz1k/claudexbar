@@ -41,7 +41,7 @@ enum DiagnosticsReport {
         lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled) \(settings.cliUpdateProviders.map(\.rawValue))")
         lines.append("golden hour: \(settings.goldenHourEnabled ? "on" : "off") at \(settings.goldenHour?.label ?? "—")")
 
-        for provider in ProviderID.allCases where settings.enabledProviders.contains(provider) || provider.isCodingCLI {
+        for provider in ProviderID.displayOrder where settings.enabledProviders.contains(provider) || provider.isCodingCLI {
             lines.append("")
             lines.append("## \(provider.displayName)")
             lines.append("cli: \(CLIExecutableLocator.executable(for: provider)?.path ?? "not found")")
