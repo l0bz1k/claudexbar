@@ -24,6 +24,7 @@ A small native macOS menu-bar app that shows how much of your AI coding limits i
 <p align="center">
   <img src="assets/Screenshot.png" width="640" alt="ClaudexBar"><br>
   <img src="assets/Screenshot2.png" width="640" alt="ClaudexBar"><br>
+  <img src="assets/Screenshot3.png" width="640" alt="ClaudexBar"><br>
   <em>Usage right in the menu bar — click to cycle providers, right-click for the menu, hold ⌥ Option for re-auth.</em>
 </p>
 
