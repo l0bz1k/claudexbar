@@ -5,7 +5,7 @@
 <h1 align="center">ClaudexBar</h1>
 
 <p align="center">
-  Codex &amp; Claude Code usage limits in your macOS menu bar — zero-config, native, dependency-free.
+  Claude Code, Codex, OpenRouter &amp; OpenCode usage limits in your macOS menu bar — native, dependency-free, nothing to configure.
 </p>
 
 <p align="center">
@@ -14,45 +14,63 @@
   <img src="https://img.shields.io/badge/macOS-13%2B-black" alt="macOS 13+">
 </p>
 
-> **This is a patched fork** of [ipangdz/claudexbar](https://github.com/ipangdz/claudexbar).
-> Grab the latest build from [Releases](https://github.com/l0bz1k/claudexbar/releases).
+> **This is an extended fork** of [ipangdz/claudexbar](https://github.com/ipangdz/claudexbar).
+> Grab the latest build from [Releases](https://github.com/l0bz1k/claudexbar/releases) — the app then keeps itself up to date.
 
-A small native macOS menu-bar app that shows **Codex** and **Claude Code** usage limits at a glance. Zero-config: it reuses your existing CLI login, shows each provider's session (5-hour) and weekly windows, and warns before you run low — no API keys, no browser cookies, no dependencies.
-
-## What's different from upstream
-
-This fork exists to fix a handful of real issues hit running the original daily on a ChatGPT Go + Claude Pro setup:
-
-- **Codex on the ChatGPT Go plan no longer shows `err`.** The Go plan reports a single, non-standard 30-day quota window instead of the usual 5-hour/weekly pair; upstream's parser didn't recognize it and failed to decode. It's now shown correctly, with a dynamically computed label (e.g. `30d`) instead of a hardcoded one.
-- **Countdown labels no longer round down to whole hours.** `4h35m` used to display as `4h` (the minutes were silently dropped once the countdown passed the one-hour mark); it now shows the real remaining time.
-- **Transparent menu-bar icon.** The pill used to paint its own opaque light/dark background — the only icon in the menu bar that didn't blend in like every other one. It's now a proper template image, matching native menu-bar icons, and the tray is only ever as wide as its actual text (no more wasted space, no more clipped trailing characters like `3h1` instead of `3h1m`). The provider glyph was also dropped to reclaim horizontal space.
-- **Opt-in "Auto-start 5h Session".** If a rate-limit window sits idle/unstarted while you're away, this sends one trivial message through the real `claude`/`codex` CLI to start its clock early, so idle time before your first prompt of the day isn't wasted quota. Off by default, per provider, with a cooldown, a daily cap, and a circuit breaker that disables itself after repeated failed attempts until you manually re-enable it.
-
-- **Used or remaining %, pace warning, tooltip, diagnostics.** Optionally show *used* % like the Claude/ChatGPT apps; a ▲ marks a window you're on pace to exhaust before it resets; hovering explains every number; **Copy Diagnostics** produces a redacted report for bug reports.
-- **"Launch at Login" no longer quits the app when unchecked**, plus a round of reliability fixes from a code review (no on-disk HTTP cache, timeouts on every CLI call, log rotation, refresh on wake).
-
-- **OpenRouter and OpenCode Go** limits alongside Codex and Claude Code, using the API key opencode already stores (opt-in in the menu).
-
-- **AI Golden Hour**: pick a time of day and ClaudexBar times your session windows so the limit resets to 100% right then, every day.
-
-Full details, including the two real bugs found and fixed along the way, are in [CHANGELOG.md](CHANGELOG.md#020--2026-09-26).
+A small native macOS menu-bar app that shows how much of your AI coding limits is left, at a glance: the session and weekly windows of **Claude Code** and **Codex**, the free-model quota and credit balance of **OpenRouter**, and the limits of **OpenCode Go** and opencode's free tier. It reuses the logins you already have — no API keys to paste, no browser cookies, no dependencies — and it can time your session windows so a fresh one starts exactly when you need it.
 
 ## Screenshots
 
 <p align="center">
   <img src="assets/Screenshot.png" width="640" alt="ClaudexBar"><br>
   <img src="assets/Screenshot2.png" width="640" alt="ClaudexBar"><br>
-  <em>Codex &amp; Claude Code usage right in the menu bar — right-click for the menu, hold ⌥ Option for re-auth.</em>
+  <em>Usage right in the menu bar — click to cycle providers, right-click for the menu, hold ⌥ Option for re-auth.</em>
 </p>
+
+## Providers
+
+| Provider | What it shows | Where the data comes from |
+|---|---|---|
+| **Claude Code** | 5-hour session · weekly limit | Claude's usage endpoint, with ClaudexBar's own sign-in (or Claude Code's login, read-only) |
+| **Codex** | 5-hour session · weekly limit (or the 30-day quota on the ChatGPT Go plan) | ChatGPT's usage endpoint, with Codex's login from `~/.codex/auth.json` |
+| **OpenRouter** | free-model requests left today · credit balance (or the key's own spending limit) | OpenRouter's API, with the key opencode stores |
+| **OpenCode Go** | 5-hour limit · the tighter of the weekly/monthly limits (all three in the tooltip) | the official `opencode.ai/zen/go/v1/usage` endpoint, with your Go key |
+| **OpenCode Free** | `ok`, or `0%` with a countdown while the free tier is blocked | opencode's local database (read-only, no network) — see below |
+
+The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/share/opencode/auth.json`) or from `OPENROUTER_API_KEY` / `OPENCODE_API_KEY`, so if opencode works, ClaudexBar does too. A provider with nothing configured shows `no key`.
+
+**About OpenCode Free:** opencode's free models have no usage API — the server only says *"Free usage limit reached"* (HTTP 429 with `Retry-After`) when it refuses a request. opencode saves that response, so ClaudexBar reads the latest one and counts down to the reset. How much free usage is left before that point is never reported, so it shows `ok` rather than an invented percentage.
 
 ## Features
 
-- Native AppKit menu bar app with no Dock icon and no main window.
-- Two providers only: Codex and Claude Code.
-- Codex auth from `~/.codex/auth.json`. Claude Code auth from a ClaudexBar-managed OAuth credential in Keychain (`ClaudexBar-Claude-Credentials`), falling back to `CLAUDE_CODE_OAUTH_TOKEN` and Claude Code's own `Claude Code-credentials` login.
-- Re-auth: Codex opens `codex login` in Terminal; Claude Code opens your browser to Claude's sign-in page. After you approve, Claude shows a one-time code — paste it into the ClaudexBar dialog and it stores its own access+refresh credential (no Terminal).
-- Configurable refresh interval and remaining-usage notifications.
-- No telemetry, analytics, or browser cookies. The only value you paste is the one-time Claude authorization code, which is exchanged for a token and never stored.
+**Menu bar and menu**
+- The tray shows one provider at a time: left-click cycles through the providers **checked** in the menu, or let **Smart Auto Switch** follow the one you're actually using.
+- The menu always shows **current limits for every provider** — all of them are polled in the background, checked or not. Figures are lined up in columns: session values under session values, weekly under weekly.
+- Each CLI's installed version is shown next to its name — green when current, orange when an update exists.
+- **Display** options: show *used* % (as the Claude and ChatGPT apps do) instead of remaining %, and a **pace warning ▲** per window — at the rate you've been using it, that limit runs out before it resets.
+- Hover the icon for a plain-language breakdown: each window, when it resets, and the pace projection behind any ▲.
+- Transparent template icon that matches the rest of the menu bar, only as wide as its text.
+
+**Auto-start 5h Session** (opt-in, per provider)
+- A session window only starts with your first message. If a fresh window sits idle while you're away, ClaudexBar sends one trivial message through the real `claude`/`codex` CLI so its clock starts — and the next reset comes sooner.
+- It acts right after a known reset, even during a brief Power Nap wake with the lid closed, and keeps the Mac awake for the few seconds the message takes.
+- Safety rails: one attempt per window, a daily cap, retry with backoff when the network fails, and a circuit breaker (with a notification) if anchoring stops working, which re-arms itself after 24 hours.
+
+**AI Golden Hour** (opt-in)
+- Pick a time of day — every day at that time, your session windows reset to **100%**. A window resets a fixed time after it starts, so ClaudexBar anchors it that much earlier (09:00 for a 14:00 golden hour with 5-hour windows).
+- Windows that fit before then start as usual; only the one that would still be running at the anchor time is held until it. Works for any window length.
+- If you're already working at the anchor time, you get one notification that today's golden hour isn't reachable, and the regular schedule continues until tomorrow.
+- Tip: choose a time on a 10-minute mark (14:00, 14:10) — Claude rounds a window's start to 10 minutes.
+
+**Updates**
+- **The app updates itself:** it checks this fork's releases daily and shows **⬆ Update to x.y.z…** at the top of the menu. One click downloads it, verifies the published SHA-256, checks the version and signature, swaps the app (restoring the old one if anything fails) and relaunches.
+- **CLI Updates:** check which CLIs ClaudexBar may update — Codex, Claude Code (on by default) and opencode (off by default, since its releases include major-version jumps). **Update Selected CLIs Now** and the optional **Daily Auto-update** only touch the checked ones.
+
+**Notifications and troubleshooting**
+- Optional notification when the shown provider's remaining usage drops below a threshold, and when a window comes back to 100%.
+- Clear status words instead of a generic error — see [Status words](#status-words).
+- **Copy Diagnostics** puts a redacted report (versions, settings, every provider's last answer, the log tail) on the clipboard, ready for a bug report.
+- No telemetry or analytics. Logs are scrubbed of anything token-shaped and rotated at 1 MB.
 
 ## Install
 
@@ -60,14 +78,12 @@ Works on **both Apple Silicon and Intel** Macs (macOS 13+).
 
 1. Download `ClaudexBar.zip` from [Releases](https://github.com/l0bz1k/claudexbar/releases/latest).
 2. Unzip it and move `ClaudexBar.app` to `/Applications` (or `~/Applications`).
-3. Open it. It isn't notarized (no Apple Developer ID), so Gatekeeper will
-   refuse to launch it normally the first time — **right-click the app →
-   Open → Open** to confirm you trust it. You only need to do this once.
+3. Open it. It isn't notarized (no Apple Developer ID), so Gatekeeper will refuse to launch it normally the first time — **right-click the app → Open → Open** to confirm you trust it. You only need to do this once.
 4. Optional: turn on **Launch at Login** from its menu.
 
-**After installing or updating, macOS asks once for Keychain access** ("ClaudexBar wants to use your confidential information…") — click **Always Allow**. Because the app is ad-hoc signed rather than signed with a Developer ID, macOS ties that permission to the exact build, so it asks again after each update. Until you answer, Claude Code usage shows `wait`.
+**After installing or updating, macOS asks once for Keychain access** ("ClaudexBar wants to use your confidential information…") — click **Always Allow**. Because the app is ad-hoc signed rather than signed with a Developer ID, macOS ties that permission to the exact build, so it asks again after each update. Until you answer, Claude Code shows `wait`.
 
-ClaudexBar checks for new releases daily and offers **⬆ Update to x.y.z…** at the top of its menu — one click installs and relaunches. To update by hand instead, download the new release and repeat steps 1–2 (step 3 is only needed again if you moved or re-downloaded the app).
+From then on the app updates itself (see **Updates** above). To update by hand instead, download the new release and repeat steps 1–2.
 
 The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/Spotlight rather than the Dock.
 
@@ -75,7 +91,7 @@ The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/S
 
 1. Quit ClaudexBar (right-click the menu-bar icon → **Quit**, or select it and press `⌘Q`).
 2. Move `ClaudexBar.app` to the Trash.
-3. If you had turned on **Launch at Login**, remove its LaunchAgent:
+3. If you had turned on **Launch at Login** or **Daily Auto-update**, remove their LaunchAgents:
    ```bash
    launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.ipang.claudexbar.plist 2>/dev/null
    rm -f ~/Library/LaunchAgents/com.ipang.claudexbar.plist ~/Library/LaunchAgents/com.ipang.claudexbar.cli-updater.plist
@@ -86,50 +102,57 @@ The app is a menu-bar accessory (`LSUIElement`), so its icon appears in Finder/S
    rm -rf ~/Library/Logs/ClaudexBar
    ```
 
-This does not touch Codex or Claude Code credentials.
+This does not touch the Claude Code, Codex or opencode credentials.
 
 ## Usage
 
-ClaudexBar can switch providers automatically: when both providers are enabled, it watches lightweight local context (foreground app/window text and recent Codex/Claude session-file activity) and switches only after one provider has been the clear winner for a short debounce window. It does not use CPU usage or shell process scans as deciding signals.
+**Left-click** the icon to cycle through the checked providers. **Right-click** for the menu:
 
-The right-click menu can also check and update the installed Claude Code and Codex CLIs. **Daily Auto-update** uses a low-priority macOS LaunchAgent and the CLIs' own `update` commands; turning it off removes only ClaudexBar's updater job. Claude Code may still use its own native auto-updater.
+- **Provider rows** — one per provider, each with its live figures (`session · weekly`, or a status word). Clicking a row toggles its checkmark without closing the menu; the checkmark only decides whether that provider takes part in the tray rotation. With none checked, the tray shows `off`.
+- **⌥ Option** reveals the re-auth action for each provider, and swaps **Refresh All** for **Open Logs…**.
+- **Refresh All**, **Smart Auto Switch**, **Auto-start 5h Session** (with **AI Golden Hour**), **Display**, **Launch at Login**, **Refresh Interval**, **Notify When Remaining**, **CLI Updates**, **Check for Updates…**, **Copy Diagnostics**.
 
-Left-click the pill to cycle between enabled providers. Manual clicks still work in auto mode and temporarily pin your choice so the pill does not jump around while you move between tools. If only one provider is enabled, left-click leaves that provider selected. Right-click for the menu.
+In the tray, the left column is the session (5-hour) window and the right column is the longer one (weekly, or monthly on some plans); the small label above each figure is the time until that window resets. Session usage also chips away at the weekly budget.
 
-The right-click menu lists the two providers, Codex and Claude Code, as 1-click checkbox rows:
+## Status words
 
-- The checkbox toggles whether the provider is enabled (both enabled → left-click cycles between them; only one enabled provider → ClaudexBar stays on it; none enabled → paused/off).
-- The row shows that provider's live usage (`5h% · 7d%`), or a status word (`auth` / `net` / `err`) when there is a problem.
-- Re-auth actions are exposed through ⌥ Option alternates.
-- **Hold ⌥ Option** to swap **Open Logs…** into the maintenance area.
+| Shown | Meaning | What to do |
+|---|---|---|
+| `wait` | No data yet (just launched, or a Keychain prompt is waiting) | Answer the Keychain prompt with **Always Allow** |
+| `auth` | The login expired or was rejected | ⌥ → **Re-auth** that provider (see below) |
+| `no key` | No API key configured for OpenRouter / OpenCode Go | `opencode auth login`, or set `OPENROUTER_API_KEY` / `OPENCODE_API_KEY` |
+| `no opencode` | opencode isn't installed or has never run | Install and run opencode once |
+| `net` | The service couldn't be reached and there's no earlier data to show | Usually temporary; check your network or proxy |
+| `vpn` | Cloudflare blocked your IP (often a VPN/proxy exit) — the tooltip names it | Switch to another proxy node |
+| `err` | An unexpected answer from the service | **Copy Diagnostics** and open an issue |
 
-Below the providers are Refresh All, Smart Auto Switch, Launch at Login, Refresh Interval, and Notify When Remaining.
-
-The left usage column is the current session window. The right column is the weekly budget. Session usage also chips away at the weekly budget.
+Temporary problems (a rate limit, a network blip) don't replace the figures: the last known values stay on screen, and after an HTTP 429 the next request to that service waits 2, 4, 8… minutes (up to 10). **Refresh All** always goes out immediately.
 
 ## Troubleshooting
 
-- `auth` for Codex: run `codex login`.
-- `auth` for Claude Code: choose `Re-auth` → `Claude Code` from the ClaudexBar menu. Your browser opens to Claude's sign-in page (`claude.com/cai/oauth/authorize`). Approve access; Claude's callback page then shows a one-time `code#state` string. Copy it and paste it into the ClaudexBar dialog (it pre-fills from your clipboard when it recognises a code). ClaudexBar exchanges it for an access+refresh credential — with the full scopes the usage endpoint needs — stored in the Keychain service `ClaudexBar-Claude-Credentials`, then refreshes usage. The code and tokens are never logged.
-- Why a paste (and not a fully automatic flow): Claude's OAuth client does not accept a `localhost` redirect, so the authorization code is returned to Claude's own callback page rather than to ClaudexBar directly. The one paste bridges that page back to the app.
-- Why a separate credential: Claude Code's own `Claude Code-credentials` login rotates its refresh token on every refresh, so a background menu-bar app reading that snapshot would be invalidated whenever Claude Code refreshes (and vice versa). ClaudexBar runs its own OAuth sign-in to get an independent credential it refreshes on its own (the access token lasts ~8 hours and is refreshed automatically).
-- `login` stuck in the pill: the code exchange is still running or failed. Check `auth` afterwards and re-run `Re-auth` → `Claude Code`.
-- `auth` right after re-auth: the paste may have been incomplete. Re-run and paste the entire `code#state` string from Claude's page.
-- If you want terminal Claude Code sessions to use a manually generated token too, set:
+- `auth` for Codex: run `codex login` (or ⌥ → **Re-auth Codex**).
+- `auth` for Claude Code: choose ⌥ → **Re-auth Claude Code**. Your browser opens Claude's sign-in page; approve access, copy the one-time `code#state` string Claude shows, and paste it into the ClaudexBar dialog (it pre-fills from the clipboard when it recognises a code). ClaudexBar exchanges it for its own access + refresh credential, stored in the Keychain as `ClaudexBar-Claude-Credentials`. The code and tokens are never logged.
+- Why a paste: Claude's OAuth client doesn't accept a `localhost` redirect, so the code comes back to Claude's own page instead of to the app.
+- Why ClaudexBar keeps its own Claude credential: Claude rotates the refresh token on every refresh, so two apps sharing one login knock each other out. ClaudexBar only ever refreshes its own credential; it may *read* Claude Code's login while that's valid, but never refreshes it.
+- The OpenRouter and OpenCode Go keys come from opencode: `opencode auth login` adds or replaces them (⌥ → **Re-auth** opens it in Terminal).
+- Something else: **Copy Diagnostics** and include the report in an issue.
 
-  ```bash
-  export CLAUDE_CODE_OAUTH_TOKEN='<token>'
-  ```
+## Differences from upstream
 
-- Claude `err`/HTTP 403: the stored credential lacks a required scope. Run `Re-auth` → `Claude Code` again — ClaudexBar requests the correct scope set itself. (Note: `claude setup-token` is **not** used; its token has too narrow a scope for the usage endpoint. See [docs/AUTH.md](docs/AUTH.md).)
-- `net`: the usage endpoint could not be reached or may be rate limited. Use the provider's `Refresh` from the menu a little later.
+Beyond the features above, this fork fixes problems found running the original daily:
+
+- Codex on the ChatGPT Go plan no longer shows `err` (its 30-day window is understood).
+- Countdowns show minutes (`4h35m`, not `4h`), and the tray text is never clipped.
+- No on-disk HTTP cache (a corrupted one used to flood the log), timeouts on every CLI call, refresh after wake, log rotation.
+- Unchecking **Launch at Login** no longer quits the app; update checks come from this fork, not upstream.
+
+The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Non-goals
 
 - No history graphs.
 - No cost estimation.
-- No embedded/in-app web view: sign-in happens in your real browser via the official CLI.
-- No additional providers in MVP.
+- No embedded web view: sign-in happens in your real browser.
 
 ## Documentation
 
@@ -139,16 +162,11 @@ The left usage column is the current session window. The right column is the wee
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The project is
-deliberately narrow (Codex + Claude Code only) and dependency-free.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The app stays dependency-free.
 
 ## Credits
 
-All credit for the original design and implementation goes to
-[ipangdz](https://github.com/ipangdz) — this fork exists only to carry a
-handful of fixes and one opt-in feature on top of that work. If you don't
-need those specifically, the [original project](https://github.com/ipangdz/claudexbar)
-is the one to use and support.
+All credit for the original design and implementation goes to [ipangdz](https://github.com/ipangdz) — this fork builds its additional providers, scheduling features and fixes on top of that work. If you only need Codex and Claude Code limits, the [original project](https://github.com/ipangdz/claudexbar) is a fine choice too, and worth supporting.
 
 ## License
 

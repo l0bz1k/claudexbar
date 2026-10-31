@@ -3,6 +3,18 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.2] — 2026-10-31
+
+### Changed
+- **Every provider is polled in the background, checked or not**, and the
+  menu always shows current limits for all of them. The checkmarks only
+  choose which providers the tray cycles through on click (and Smart Auto
+  Switch picks from). This replaces 0.7.1's "off" label for unchecked rows.
+- A provider with no API key configured shows `no key` (OpenRouter,
+  OpenCode Go), or `no opencode` when opencode isn't installed, instead of a
+  generic `auth`; a persistent error is logged once rather than every poll.
+- README rewritten for the current feature set.
+
 ## [0.7.1] — 2026-10-31
 
 ### Changed

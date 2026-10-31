@@ -41,6 +41,9 @@ final class StatusBarController: NSObject {
     /// consecutive 429s, reset by a success). Polling a rate-limited endpoint
     /// every minute only produces more 429s.
     private var rateLimitBackoff: [ProviderID: (until: Date, strikes: Int)] = [:]
+    /// Last error written to the log per provider, so a persistent condition
+    /// (e.g. a provider with no key configured) is logged once, not every poll.
+    private var lastLoggedError: [ProviderID: String] = [:]
     private var presentedMenu: NSMenu?
     private var cliUpdateSnapshot: CLIUpdateSnapshot?
     private var cliUpdateCheckInProgress = false
@@ -213,13 +216,12 @@ final class StatusBarController: NSObject {
         refreshActiveProvider(notify: false)
     }
 
+    /// Polls every provider in the background, checked or not: the checkmarks
+    /// only choose which ones the tray cycles through, while the menu always
+    /// shows current limits for all of them.
     private func refreshAll() {
-        let enabled = providerSelection.enabledProviders
-        guard !enabled.isEmpty else {
-            updateImage()
-            return
-        }
-        enabled.forEach { refresh(provider: $0) }
+        updateImage()
+        ProviderID.displayOrder.forEach { refresh(provider: $0) }
     }
 
     /// Manual "Refresh All": pulse the pill so the user gets clear feedback that
@@ -257,6 +259,7 @@ final class StatusBarController: NSObject {
                     snapshots[provider] = snapshot
                     errors[provider] = nil
                     rateLimitBackoff[provider] = nil
+                    lastLoggedError[provider] = nil
                     usageDeltaTracker.record(provider: provider, snapshot: snapshot)
                     logger.log(provider: provider, message: "usage ok")
                     handleAutoStart(provider: provider, snapshot: snapshot)
@@ -269,7 +272,10 @@ final class StatusBarController: NSObject {
                         rateLimitBackoff[provider] = (Date().addingTimeInterval(delay), strikes)
                         message += " — next try in \(Int(delay / 60)) min"
                     }
-                    logger.log(provider: provider, message: message)
+                    if lastLoggedError[provider] != message || error == .rateLimited {
+                        lastLoggedError[provider] = message
+                        logger.log(provider: provider, message: message)
+                    }
                 }
                 updateImage()
                 if notify {
@@ -602,9 +608,6 @@ final class StatusBarController: NSObject {
         if let override = statusOverrides[provider] {
             return .status(override)
         }
-        guard providerSelection.enabledProviders.contains(provider) else {
-            return .status("off") // not polled at all — "wait" read as loading
-        }
         // Like the tray: a transient error (rate limit, network blip) keeps
         // the last known figures instead of flashing a status word.
         if let snapshot = snapshots[provider], errors[provider] == nil || errors[provider]!.isTransient {
@@ -614,7 +617,14 @@ final class StatusBarController: NSObject {
             }
             return ProviderRowHint(primary: first, secondary: UsageFormatter.percentText(for: snapshot.secondary, mode: settings.percentMode))
         }
-        if let error = errors[provider] { return .status(error.statusLabel) }
+        if let error = errors[provider] {
+            // An API-key provider with no key configured isn't an expired
+            // login: say what's missing.
+            if case .missingAuth = error, !provider.isCodingCLI {
+                return .status(provider == .opencodeFree ? "no opencode" : "no key")
+            }
+            return .status(error.statusLabel)
+        }
         return .status("wait")
     }
 
