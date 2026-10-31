@@ -3,6 +3,19 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.3] — 2026-10-31
+
+### Fixed
+- **OpenCode Free showed "ok" while opencode was blocked and waiting to
+  retry.** opencode only writes the refusal (with its `Retry-After`) to its
+  database once it gives up; while it waits ("retrying in 9h 41m") the block
+  exists only in its log. ClaudexBar now also reads the newest free-tier
+  refusal from opencode's log and treats it as a block until a free-model
+  answer completes successfully afterwards. Without a recorded reset time it
+  shows 0% with no countdown (the tooltip says when the limit was hit); once
+  opencode stores the refusal, the exact countdown takes over. An unconfirmed
+  block stops counting after 24 hours.
+
 ## [0.7.2] — 2026-10-31
 
 ### Changed

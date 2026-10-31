@@ -15,14 +15,24 @@ public struct OpenCodeFreeProvider: UsageProvider {
     public let displayName = ProviderID.opencodeFree.displayName
 
     private let databaseURL: URL
+    private let logURL: URL
     private let now: @Sendable () -> Date
 
     public static var defaultDatabaseURL: URL {
         OpencodeKeyReader.defaultAuthURL.deletingLastPathComponent().appendingPathComponent("opencode.db")
     }
 
-    public init(databaseURL: URL = OpenCodeFreeProvider.defaultDatabaseURL, now: @escaping @Sendable () -> Date = { Date() }) {
+    public static var defaultLogURL: URL {
+        OpencodeKeyReader.defaultAuthURL.deletingLastPathComponent().appendingPathComponent("log/opencode.log")
+    }
+
+    public init(
+        databaseURL: URL = OpenCodeFreeProvider.defaultDatabaseURL,
+        logURL: URL = OpenCodeFreeProvider.defaultLogURL,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.databaseURL = databaseURL
+        self.logURL = logURL
         self.now = now
     }
 
@@ -37,7 +47,16 @@ public struct OpenCodeFreeProvider: UsageProvider {
         guard let latest = Self.latestRefusal(databaseURL: databaseURL) else {
             return .failure(.decoding)
         }
-        return .success(Self.snapshot(refusalJSON: latest.isEmpty ? nil : latest, now: now()))
+        // While opencode is still waiting to retry, the refusal exists only in
+        // its log (and in memory): nothing reaches the database until it gives
+        // up. Check whether a free-model answer has succeeded since then.
+        let liveRefusal = Self.latestLoggedRefusal(logURL: logURL)
+        let succeeded = liveRefusal.map { Self.freeModelSucceeded(since: $0, databaseURL: databaseURL) } ?? false
+        return .success(Self.snapshot(
+            refusalJSON: latest.isEmpty ? nil : latest,
+            loggedRefusalAt: succeeded ? nil : liveRefusal,
+            now: now()
+        ))
     }
 
     /// The newest stored free-tier refusal, "" when there is none, nil when the
@@ -70,8 +89,25 @@ public struct OpenCodeFreeProvider: UsageProvider {
         }
     }
 
-    public static func snapshot(refusalJSON: String?, now: Date) -> UsageSnapshot {
+    /// How long an unconfirmed (log-only) block is assumed to last at most.
+    /// Free-tier waits seen so far are 5-17 h.
+    static let unconfirmedBlockLimit: TimeInterval = 24 * 60 * 60
+
+    public static func snapshot(refusalJSON: String?, loggedRefusalAt: Date? = nil, now: Date) -> UsageSnapshot {
         let resetAt = refusalJSON.flatMap { resetDate(fromRefusal: $0) }
+        if resetAt.map({ $0 <= now }) ?? true,
+           let blockedAt = loggedRefusalAt,
+           blockedAt <= now, now.timeIntervalSince(blockedAt) < unconfirmedBlockLimit {
+            let clock = DateFormatter()
+            clock.dateFormat = "HH:mm"
+            let window = UsageWindow(
+                windowLabel: "free",
+                remainingPercent: 0,
+                resetAt: nil,
+                title: "Free tier: limit reached at \(clock.string(from: blockedAt)) — opencode is waiting to retry; it hasn't recorded when the limit resets yet"
+            )
+            return UsageSnapshot(primary: window, secondary: nil, fetchedAt: now)
+        }
         if let resetAt, resetAt > now {
             let window = UsageWindow(
                 windowLabel: "free",
@@ -89,6 +125,57 @@ public struct OpenCodeFreeProvider: UsageProvider {
             displayValue: "ok"
         )
         return UsageSnapshot(primary: window, secondary: nil, fetchedAt: now)
+    }
+
+    /// The newest free-tier refusal opencode logged ("stream error … Free usage
+    /// limit reached" for provider `opencode`), read from the end of its log.
+    public static func latestLoggedRefusal(logURL: URL, tailBytes: Int = 1_000_000) -> Date? {
+        guard let handle = try? FileHandle(forReadingFrom: logURL) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for line in text.split(separator: "\n").reversed()
+        // opencode truncates long log lines ("…Free usage limit reac"), so match the
+        // stable prefix of both its phrasings ("limit reached", "exceeded").
+        where line.contains("Free usage") && line.contains("stream error") && line.contains("providerID=opencode ") {
+            guard let range = line.range(of: "timestamp=") else { continue }
+            let stamp = line[range.upperBound...].prefix { $0 != " " }
+            if let date = iso.date(from: String(stamp)) ?? ISO8601DateFormatter().date(from: String(stamp)) {
+                return date
+            }
+        }
+        return nil
+    }
+
+    /// Whether a free-tier ("opencode" provider) answer completed without an
+    /// error after `date` — proof the block has lifted.
+    public static func freeModelSucceeded(since date: Date, databaseURL: URL) -> Bool {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2("file:\(databaseURL.path)?mode=ro", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+            sqlite3_close(db)
+            return false
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 1000)
+        let sql = """
+        SELECT 1 FROM message
+        WHERE time_created > ?
+          AND json_extract(data, '$.role') = 'assistant'
+          AND json_extract(data, '$.providerID') = 'opencode'
+          AND json_extract(data, '$.time.completed') IS NOT NULL
+          AND json_extract(data, '$.error') IS NULL
+          AND COALESCE(json_extract(data, '$.tokens.output'), 0) > 0
+        LIMIT 1
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, Int64(date.timeIntervalSince1970 * 1000))
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 
     /// `Date` header (falling back to the message's completion time) plus

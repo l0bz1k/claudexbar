@@ -1152,6 +1152,69 @@ func testProvidersListAlphabetically() throws {
                "menus list providers alphabetically: \(ProviderID.displayOrder.map(\.displayName))")
 }
 
+// MARK: - v0.7.3: OpenCode Free blocks seen in opencode's log
+
+private let realOpencodeLogTail = """
+timestamp=2026-10-31T14:23:31.331Z level=INFO run=835078d2 message=stream providerID=opencode modelID=deepseek-v4.1-flash-free session.id=ses_x small=false agent=build mode=primary
+timestamp=2026-10-31T14:23:32.208Z level=ERROR run=835078d2 message="stream error" providerID=opencode modelID=deepseek-v4.1-flash-free session.id=ses_x small=false agent=build mode=primary error.error="AI_APICallError: Free usage limit reached. Free models work in OpenCode
+timestamp=2026-10-31T14:23:38.965Z level=ERROR run=835078d2 message="stream error" providerID=opencode modelID=deepseek-v4.1-flash-free session.id=ses_x small=true agent=title mode=primary error.error="AI_RetryError: Failed after 3 attempts. Last error: Free usage limit reac
+timestamp=2026-10-31T14:30:00.000Z level=ERROR run=1 message="stream error" providerID=openrouter modelID=x error.error="Free usage limit reached elsewhere"
+timestamp=2026-10-31T14:31:00.000Z level=INFO run=1 message="unrelated"
+"""
+
+func testOpenCodeFreeReadsLatestLoggedRefusal() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-oclog-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let log = dir.appendingPathComponent("opencode.log")
+    try Data(realOpencodeLogTail.utf8).write(to: log)
+    let at = try expectNonNil(OpenCodeFreeProvider.latestLoggedRefusal(logURL: log), "refusal found in the log")
+    try expect(abs(at.timeIntervalSince(ISO8601DateFormatter().date(from: "2026-10-31T14:23:38Z")!) - 0.965) < 0.01,
+               "newest opencode-provider refusal; other providers' errors and later lines ignored: \(at)")
+    try expect(OpenCodeFreeProvider.latestLoggedRefusal(logURL: dir.appendingPathComponent("none.log")) == nil, "no log -> nil")
+}
+
+func testOpenCodeFreeDetectsSuccessAfterRefusal() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-ocok-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let db = dir.appendingPathComponent("opencode.db")
+    func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
+    let success = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"tokens":{"output":12}}"#
+    let pending = #"{"role":"assistant","providerID":"opencode","time":{"created":1}}"#
+    let failed = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"error":{"name":"APIError"},"tokens":{"output":0}}"#
+    let sql = """
+    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
+    INSERT INTO message VALUES ('a','s',1000,1000,\(q(success)));
+    INSERT INTO message VALUES ('b','s',5000,5000,\(q(pending)));
+    INSERT INTO message VALUES ('c','s',6000,6000,\(q(failed)));
+    """
+    let created = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, sql], timeout: 20) }
+    try expect(created.succeeded, "test database created")
+    let blockedAt = Date(timeIntervalSince1970: 2) // 2000 ms
+    try expect(!OpenCodeFreeProvider.freeModelSucceeded(since: blockedAt, databaseURL: db), "a pending retry or a failed answer isn't a success")
+
+    let later = #"{"role":"assistant","providerID":"opencode","time":{"created":7,"completed":8},"tokens":{"output":5}}"#
+    let insertLater = "INSERT INTO message VALUES ('d','s',7000,7000,\(q(later)));"
+    _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, insertLater], timeout: 20) }
+    try expect(OpenCodeFreeProvider.freeModelSucceeded(since: blockedAt, databaseURL: db), "a completed free-model answer after the refusal lifts the block")
+}
+
+func testOpenCodeFreeLoggedBlockSnapshot() throws {
+    let blockedAt = ISO8601DateFormatter().date(from: "2026-10-31T14:23:32Z")!
+    let now = blockedAt.addingTimeInterval(60)
+    let live = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: now)
+    try expect(live.primary?.remainingPercent == 0 && live.primary?.resetAt == nil && live.primary?.displayValue == nil, "blocked while opencode waits to retry: 0%, no invented countdown")
+    try expect(live.primary?.title?.contains("limit reached at") == true, "the tooltip explains the missing reset time")
+
+    // A stored refusal with Retry-After (opencode gave up) gives the exact countdown.
+    let exact = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, loggedRefusalAt: blockedAt, now: ISO8601DateFormatter().date(from: "2026-10-30T20:00:00Z")!)
+    try expect(exact.primary?.resetAt != nil, "an exact reset from the database wins")
+
+    let stale = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(25 * 3600))
+    try expect(stale.primary?.displayValue == "ok", "an unconfirmed block expires after 24 h")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1801,6 +1864,9 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("OpenCode Free reads latest logged refusal", testOpenCodeFreeReadsLatestLoggedRefusal),
+    ("OpenCode Free detects success after refusal", testOpenCodeFreeDetectsSuccessAfterRefusal),
+    ("OpenCode Free logged-block snapshot", testOpenCodeFreeLoggedBlockSnapshot),
     ("providers list alphabetically", testProvidersListAlphabetically),
     ("golden hour decisions", testGoldenHourDecisions),
     ("golden hour chain hits target without skipping windows", testGoldenHourChainHitsTargetWithoutSkippingWindows),
