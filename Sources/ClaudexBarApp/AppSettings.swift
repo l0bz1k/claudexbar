@@ -184,6 +184,20 @@ final class AppSettings {
         defaults.set(date, forKey: "goldenMissNotifiedFor.\(provider.rawValue)")
     }
 
+    // MARK: Banked resets
+
+    /// Resets a "new reset available" notification was already sent for, and
+    /// those already warned about before expiring — so each is announced once.
+    var resetNotifiedKeys: Set<String> {
+        get { Set(defaults.stringArray(forKey: "resetNotifiedKeys") ?? []) }
+        set { defaults.set(Array(newValue).sorted(), forKey: "resetNotifiedKeys") }
+    }
+
+    var resetExpiryWarnedKeys: Set<String> {
+        get { Set(defaults.stringArray(forKey: "resetExpiryWarnedKeys") ?? []) }
+        set { defaults.set(Array(newValue).sorted(), forKey: "resetExpiryWarnedKeys") }
+    }
+
     // MARK: CLI updates
 
     /// Whether "Update Selected CLIs" and the daily auto-update may update this

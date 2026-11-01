@@ -3,6 +3,23 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-11-01
+
+### Added
+- **Banked rate-limit resets** for Codex and Claude Code. Both now grant
+  resets you can apply yourself later to bring a limit straight back to 100%
+  — and they expire (Codex: 30 days after they're granted).
+  - The menu shows them under the provider: "↺ 2 resets · until 6 Nov 23:44,
+    30 Nov 20:53"; the tooltip and Copy Diagnostics include them too.
+  - A notification when a new reset appears, and another a day before one
+    expires — for every provider, whether or not it's checked for the tray.
+  - Codex: the count comes with every usage response, the dates from
+    `/wham/rate-limit-reset-credits`, fetched only when there are resets and
+    at most every 6 hours unless the count changes. Claude: the usage request
+    now asks for the `cedar_ember` block, which Anthropic includes when the
+    account holds resets.
+  - The identifier that *spends* a reset is never read or stored.
+
 ## [0.7.3] — 2026-10-31
 
 ### Fixed

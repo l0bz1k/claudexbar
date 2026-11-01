@@ -1215,6 +1215,100 @@ func testOpenCodeFreeLoggedBlockSnapshot() throws {
     try expect(stale.primary?.displayValue == "ok", "an unconfirmed block expires after 24 h")
 }
 
+// MARK: - v0.8.0: banked rate-limit resets
+
+/// The real Codex responses captured on 2026-11-01 (identifiers removed).
+private let realCodexUsageWithResets = Data(#"""
+{"plan_type":"go","rate_limit":{"allowed":true,"limit_reached":false,
+ "primary_window":{"used_percent":0,"limit_window_seconds":2592000,"reset_after_seconds":2592000,"reset_at":1796146731},
+ "secondary_window":null},
+ "rate_limit_reset_credits":{"available_count":2,"applicable_available_count":0}}
+"""#.utf8)
+
+private let realCodexResetDetails = Data(#"""
+{"credits":[
+  {"reset_type":"codex_rate_limits","is_supported_by_plan":true,"status":"available",
+   "granted_at":"2026-10-07T20:44:02.587718Z","expires_at":"2026-11-06T20:44:02.587718Z",
+   "title":"Full reset (Monthly)","description":"Thanks for using Codex!"},
+  {"reset_type":"codex_rate_limits","is_supported_by_plan":true,"status":"redeemed",
+   "expires_at":"2026-10-20T00:00:00Z","title":"Used one"},
+  {"reset_type":"codex_rate_limits","is_supported_by_plan":true,"status":"available",
+   "granted_at":"2026-10-31T17:53:09.490520Z","expires_at":"2026-11-30T17:53:09.490520Z",
+   "title":"Full reset (Monthly)"}],
+ "available_count":2,"total_earned_count":0}
+"""#.utf8)
+
+func testCodexBankedResetParsing() throws {
+    try expect(BankedResetParser.codexCount(realCodexUsageWithResets) == 2, "count from the usage response")
+    let items = try expectNonNil(BankedResetParser.codexDetails(realCodexResetDetails), "details parse")
+    try expect(items.count == 2, "only available resets, redeemed one dropped")
+    let first = try expectNonNil(items[0].expiresAt, "microsecond expiry parses")
+    try expect(abs(first.timeIntervalSince(ISO8601DateFormatter().date(from: "2026-11-06T20:44:02Z")!) - 0.587718) < 0.001, "exact expiry: \(first)")
+    try expect(items[0].title == "Full reset (Monthly)", "title kept")
+    let summary = UsageFormatter.resetsSummary(BankedResets(count: 2, items: items), timeZone: TimeZone(identifier: "UTC")!)
+    try expect(summary == "2 resets · until 6 Nov 20:44, 30 Nov 17:53", "menu line: \(summary)")
+    try expect(BankedResetParser.codexCount(Data(#"{"plan_type":"go"}"#.utf8)) == nil, "no block -> nothing")
+}
+
+func testClaudeBankedResetParsing() throws {
+    let launch = Data(#"""
+    {"five_hour":{"utilization":2,"resets_at":"2026-09-24T17:49:59Z"},
+     "cedar_ember":{"eligible":true,"ineligible_reason":null,"grants":[
+       {"id":"a-redemption-handle","label":"Claude Opus 5.5 launch: one usage-limit reset","resets_total":1,"resets_left":1,
+        "starts_at":"2026-09-22T16:00:00+00:00","ends_at":"2026-10-22T16:00:00+00:00","paused":false,"usable_now":true},
+       {"id":"x","label":"paused","resets_left":1,"paused":true,"usable_now":true},
+       {"id":"y","label":"spent","resets_left":0,"paused":false,"usable_now":true}]}}
+    """#.utf8)
+    let resets = try expectNonNil(BankedResetParser.claude(launch), "cedar_ember parses")
+    try expect(resets.count == 1 && resets.items.count == 1, "paused and spent grants don't count")
+    try expect(resets.nextExpiry == ISO8601DateFormatter().date(from: "2026-10-22T16:00:00Z"), "+00:00 expiry parses")
+    try expect(resets.items[0].usableNow == true, "usable flag kept")
+    try expect(BankedResetParser.claude(Data(#"{"cedar_ember":{"eligible":false,"ineligible_reason":"surface","grants":[{"resets_left":1,"ends_at":"2026-10-22T16:00:00Z"}]}}"#.utf8)) == nil, "ineligible -> nothing")
+    try expect(BankedResetParser.claude(Data(#"{"cedar_ember":null}"#.utf8)) == nil, "null -> nothing")
+}
+
+/// Routes by URL path and counts requests per path.
+private final class PathRoutingHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private let routes: [String: Data]
+    private(set) var hits: [String: Int] = [:]
+    private(set) var urls: [URL] = []
+    init(_ routes: [String: Data]) { self.routes = routes }
+    func count(_ path: String) -> Int { lock.withLock { hits[path, default: 0] } }
+    var allURLs: [URL] { lock.withLock { urls } }
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        let url = request.url!
+        lock.withLock { hits[url.path, default: 0] += 1; urls.append(url) }
+        guard let body = routes[url.path] else { return HTTPResponse(data: Data(), statusCode: 404) }
+        return HTTPResponse(data: body, statusCode: 200)
+    }
+}
+
+func testCodexProviderAttachesResetsAndCachesDetails() throws {
+    let http = PathRoutingHTTPClient([
+        "/backend-api/wham/usage": realCodexUsageWithResets,
+        "/backend-api/wham/rate-limit-reset-credits": realCodexResetDetails
+    ])
+    let provider = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: http)
+    guard case .success(let first) = runBlocking({ await provider.fetchUsage() }) else { throw TestFailure(description: "first fetch") }
+    try expect(first.resets?.count == 2 && first.resets?.items.count == 2, "resets attached to the snapshot")
+    try expect(first.primary?.windowLabel == "30d" || first.secondary?.windowLabel == "30d", "usage itself unchanged")
+    _ = runBlocking { await provider.fetchUsage() }
+    try expect(http.count("/backend-api/wham/rate-limit-reset-credits") == 1, "details are cached, not re-fetched every poll")
+    try expect(http.count("/backend-api/wham/usage") == 2, "usage still polled each time")
+}
+
+func testClaudeRequestAsksForBankedResets() throws {
+    let usage = Data(#"{"five_hour":{"utilization":10,"resets_at":"2026-11-01T20:00:00Z"},"seven_day":{"utilization":5,"resets_at":"2026-11-05T20:00:00Z"},"cedar_ember":{"eligible":true,"grants":[{"label":"g","resets_left":2,"ends_at":"2026-11-20T00:00:00Z","usable_now":true,"paused":false}]}}"#.utf8)
+    let http = PathRoutingHTTPClient(["/api/oauth/usage": usage])
+    let reader = StubClaudeReader([ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "t", refreshToken: nil, expiresAt: futureMillis), source: .claudeCode)])
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    guard case .success(let snapshot) = runBlocking({ await provider.fetchUsage() }) else { throw TestFailure(description: "claude fetch") }
+    try expect(http.allURLs.first?.query == "cedar_ember=1", "usage request asks for banked resets: \(String(describing: http.allURLs.first))")
+    try expect(snapshot.resets?.count == 2, "two resets from one grant")
+    try expect(snapshot.primary != nil, "usage itself unchanged")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1864,6 +1958,10 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("Codex banked reset parsing", testCodexBankedResetParsing),
+    ("Claude banked reset parsing", testClaudeBankedResetParsing),
+    ("Codex provider attaches resets and caches details", testCodexProviderAttachesResetsAndCachesDetails),
+    ("Claude request asks for banked resets", testClaudeRequestAsksForBankedResets),
     ("OpenCode Free reads latest logged refusal", testOpenCodeFreeReadsLatestLoggedRefusal),
     ("OpenCode Free detects success after refusal", testOpenCodeFreeDetectsSuccessAfterRefusal),
     ("OpenCode Free logged-block snapshot", testOpenCodeFreeLoggedBlockSnapshot),

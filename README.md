@@ -68,6 +68,7 @@ The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/s
 - **CLI Updates:** check which CLIs ClaudexBar may update — Codex, Claude Code (on by default) and opencode (off by default, since its releases include major-version jumps). **Update Selected CLIs Now** and the optional **Daily Auto-update** only touch the checked ones.
 
 **Notifications and troubleshooting**
+- **Banked rate-limit resets** (Codex, Claude Code): how many you have and until when, under each provider in the menu — with a notification when one appears and a day before one expires.
 - Optional notification when the shown provider's remaining usage drops below a threshold, and when a window comes back to 100%.
 - Clear status words instead of a generic error — see [Status words](#status-words).
 - **Copy Diagnostics** puts a redacted report (versions, settings, every provider's last answer, the log tail) on the clipboard, ready for a bug report.

@@ -14,7 +14,8 @@ public struct ClaudeProvider: UsageProvider {
     public init(
         credentialReader: any ClaudeCredentialReading = ClaudeCredentialReader(),
         httpClient: any HTTPClient = URLSessionHTTPClient(),
-        usageURL: URL = URL(string: "https://api.anthropic.com/api/oauth/usage")!,
+        // `cedar_ember=1` adds the banked limit resets; the rest is unchanged.
+        usageURL: URL = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")!,
         refreshURL: URL = URL(string: "https://platform.claude.com/v1/oauth/token")!,
         now: @escaping @Sendable () -> Date = { Date() },
         persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)? = nil
@@ -120,7 +121,7 @@ public struct ClaudeProvider: UsageProvider {
         let response = try await httpClient.data(for: request)
         switch response.statusCode {
         case 200..<300:
-            return .success(try Self.parseUsageResponse(response.data, fetchedAt: now()))
+            return .success(try Self.parseUsageResponse(response.data, fetchedAt: now()).withResets(BankedResetParser.claude(response.data)))
         case 401:
             guard let refreshToken else { return .failure(.authExpired) }
             do {

@@ -66,6 +66,9 @@ enum DiagnosticsReport {
                 lines.append("no snapshot yet")
             }
 
+            if let resets = snapshots[provider]?.resets {
+                lines.append("banked resets: \(UsageFormatter.resetsSummary(resets, timeZone: TimeZone(identifier: "UTC")!)) UTC")
+            }
             let state = autoStarter.currentState(provider: provider)
             lines.append(
                 "auto-start: enabled \(settings.autoStartEnabled(for: provider)); breaker \(state.circuitBroken) since \(date(state.circuitBrokenAt)); " +

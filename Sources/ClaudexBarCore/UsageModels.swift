@@ -81,12 +81,15 @@ public struct UsageSnapshot: Equatable, Sendable {
     /// Windows that don't fit the two tray columns (e.g. OpenCode Go's third
     /// limit). Shown in the tooltip and diagnostics only.
     public let extraWindows: [UsageWindow]
+    /// Banked rate-limit resets the account holds, if the provider reports any.
+    public let resets: BankedResets?
 
-    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = []) {
+    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = [], resets: BankedResets? = nil) {
         self.primary = primary
         self.secondary = secondary
         self.fetchedAt = fetchedAt
         self.extraWindows = extraWindows
+        self.resets = resets
     }
 }
 

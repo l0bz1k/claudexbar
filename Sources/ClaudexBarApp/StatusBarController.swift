@@ -257,6 +257,7 @@ final class StatusBarController: NSObject {
                 switch result {
                 case .success(let snapshot):
                     snapshots[provider] = snapshot
+                    evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     errors[provider] = nil
                     rateLimitBackoff[provider] = nil
                     lastLoggedError[provider] = nil
@@ -523,7 +524,66 @@ final class StatusBarController: NSObject {
                 lines.append("   " + UsageFormatter.paceSummary(pace, windowName: name, now: now))
             }
         }
+        if let resets = snapshot.resets, resets.count > 0 {
+            lines.append("Banked resets: " + UsageFormatter.resetsSummary(resets))
+        }
         return lines.joined(separator: "\n")
+    }
+
+    /// Announces each banked reset once when it appears, and once more a day
+    /// before it expires. Runs for every provider, checked for the tray or not
+    /// — a reset is worth knowing about either way.
+    private func evaluateResetNotifications(provider: ProviderID, resets: BankedResets?, now: Date = Date()) {
+        guard let resets, !resets.items.isEmpty else { return } // count without details: nothing dated to announce
+        func key(_ reset: BankedReset) -> String {
+            "\(provider.rawValue)|\(Int(reset.expiresAt?.timeIntervalSince1970 ?? 0))|\(reset.title ?? "")"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "d MMM HH:mm"
+
+        var notified = settings.resetNotifiedKeys
+        let fresh = resets.items.filter { !notified.contains(key($0)) }
+        if !fresh.isEmpty {
+            fresh.forEach { notified.insert(key($0)) }
+            let latest = fresh.compactMap(\.expiresAt).max().map { " Valid until \(formatter.string(from: $0))." } ?? ""
+            let noun = resets.count == 1 ? "reset" : "resets"
+            sendResetNotification(
+                id: "reset-new-\(provider.rawValue)",
+                title: "\(provider.displayName): rate-limit reset available",
+                body: "You have \(resets.count) \(noun) to apply when you hit a limit.\(latest)"
+            )
+            logger.log(provider: provider, message: "banked resets: \(UsageFormatter.resetsSummary(resets))")
+        }
+
+        var warned = settings.resetExpiryWarnedKeys
+        for reset in resets.items {
+            guard let expiry = reset.expiresAt, expiry > now, expiry.timeIntervalSince(now) <= 24 * 60 * 60,
+                  !warned.contains(key(reset)) else { continue }
+            warned.insert(key(reset))
+            let left = UsageFormatter.resetLabel(resetAt: expiry, now: now)
+            sendResetNotification(
+                id: "reset-expiry-\(key(reset))",
+                title: "\(provider.displayName): a reset expires in \(left)",
+                body: "It lapses \(formatter.string(from: expiry)) — apply it in \(provider.displayName) before then, or it's gone."
+            )
+        }
+
+        // Forget keys of resets that have expired, so the lists don't grow.
+        let live = Set(resets.items.map(key))
+        let isLive: (String) -> Bool = { k in
+            live.contains(k) || !k.hasPrefix("\(provider.rawValue)|")
+        }
+        settings.resetNotifiedKeys = notified.filter(isLive)
+        settings.resetExpiryWarnedKeys = warned.filter(isLive)
+    }
+
+    private func sendResetNotification(id: String, title: String, body: String) {
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
 
     private func showMenu() {
@@ -600,6 +660,14 @@ final class StatusBarController: NSObject {
         reauth.isAlternate = true
         reauth.keyEquivalentModifierMask = .option
         menu.addItem(reauth)
+
+        if let resets = snapshots[provider]?.resets, resets.count > 0 {
+            let line = NSMenuItem(title: "↺ " + UsageFormatter.resetsSummary(resets), action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            line.indentationLevel = 1
+            line.toolTip = resets.items.compactMap(\.title).first
+            menu.addItem(line)
+        }
     }
 
     /// Inline status shown after the provider name: remaining percentages when

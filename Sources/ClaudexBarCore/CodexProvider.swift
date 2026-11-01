@@ -7,15 +7,19 @@ public struct CodexProvider: UsageProvider {
     private let authReader: any CodexAuthReading
     private let httpClient: any HTTPClient
     private let usageURL: URL
+    private let resetCreditsURL: URL
+    private let resetCache = ResetDetailCache()
 
     public init(
         authReader: any CodexAuthReading = CodexAuthReader(),
         httpClient: any HTTPClient = URLSessionHTTPClient(),
-        usageURL: URL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+        usageURL: URL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!,
+        resetCreditsURL: URL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
     ) {
         self.authReader = authReader
         self.httpClient = httpClient
         self.usageURL = usageURL
+        self.resetCreditsURL = resetCreditsURL
     }
 
     public func fetchUsage() async -> Result<UsageSnapshot, UsageError> {
@@ -36,7 +40,8 @@ public struct CodexProvider: UsageProvider {
             let response = try await httpClient.data(for: request)
             switch response.statusCode {
             case 200..<300:
-                return .success(try Self.parseUsageResponse(response.data, fetchedAt: Date()))
+                let snapshot = try Self.parseUsageResponse(response.data, fetchedAt: Date())
+                return .success(snapshot.withResets(await bankedResets(usage: response.data, template: request)))
             case 401:
                 return .failure(.authExpired)
             case 429:
@@ -55,6 +60,30 @@ public struct CodexProvider: UsageProvider {
 
     public func reauthCommand() -> ShellCommand {
         ShellCommand("codex", ["login"])
+    }
+
+    /// The count rides along with every usage response; the details (title,
+    /// expiry) need a separate GET, made only when there are resets and at
+    /// most every 6 hours unless the count changes. A failed detail call keeps
+    /// the last details — or shows just the count.
+    private func bankedResets(usage: Data, template: URLRequest) async -> BankedResets? {
+        guard let count = BankedResetParser.codexCount(usage) else { return nil }
+        guard count > 0 else {
+            resetCache.store(count: 0, items: [])
+            return nil
+        }
+        if let cached = resetCache.fresh(count: count) {
+            return BankedResets(count: count, items: cached)
+        }
+        var request = template
+        request.url = resetCreditsURL
+        if let response = try? await httpClient.data(for: request),
+           (200..<300).contains(response.statusCode),
+           let items = BankedResetParser.codexDetails(response.data) {
+            resetCache.store(count: count, items: items)
+            return BankedResets(count: count, items: items)
+        }
+        return BankedResets(count: count, items: resetCache.stale() ?? [])
     }
 
     public static func parseUsageResponse(_ data: Data, fetchedAt: Date) throws -> UsageSnapshot {
@@ -186,5 +215,30 @@ private extension KeyedDecodingContainer {
             return double
         }
         throw DecodingError.dataCorruptedError(forKey: key, in: self, debugDescription: "Expected numeric value")
+    }
+}
+
+/// Last fetched reset details, reused while the count is unchanged.
+final class ResetDetailCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = -1
+    private var items: [BankedReset] = []
+    private var fetchedAt = Date.distantPast
+    private let maxAge: TimeInterval = 6 * 60 * 60
+
+    func fresh(count: Int, now: Date = Date()) -> [BankedReset]? {
+        lock.withLock { self.count == count && now.timeIntervalSince(fetchedAt) < maxAge ? items : nil }
+    }
+
+    func stale() -> [BankedReset]? {
+        lock.withLock { count >= 0 ? items : nil }
+    }
+
+    func store(count: Int, items: [BankedReset], now: Date = Date()) {
+        lock.withLock {
+            self.count = count
+            self.items = items
+            self.fetchedAt = now
+        }
     }
 }
