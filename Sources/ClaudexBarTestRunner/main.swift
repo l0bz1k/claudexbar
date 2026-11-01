@@ -1309,6 +1309,44 @@ func testClaudeRequestAsksForBankedResets() throws {
     try expect(snapshot.primary != nil, "usage itself unchanged")
 }
 
+// MARK: - v0.8.1: Claude included credit, opencode same-major updates
+
+func testClaudeIncludedCreditFromRealResponse() throws {
+    // Block as the API returned it on 2026-11-01 ("Included credit $100, expires Nov 5 10:59 GMT+3").
+    let usage = Data(#"""
+    {"five_hour":{"utilization":3,"resets_at":"2026-11-01T22:00:00+00:00"},
+     "iguana_necktie":{"utilization":0.0,"resets_at":"2026-11-05T07:59:00+00:00","limit_dollars":100,"used_dollars":0.0,"remaining_dollars":100.0,"locked_reason":null},
+     "cedar_ember":{"eligible":false,"ineligible_reason":"surface","grants":[]}}
+    """#.utf8)
+    let credit = try expectNonNil(BankedResetParser.claudeIncludedCredit(usage), "credit parses")
+    try expect(credit.remaining == 100 && credit.total == 100, "amounts")
+    try expect(credit.expiresAt == ISO8601DateFormatter().date(from: "2026-11-05T07:59:00Z"), "expiry = 10:59 Moscow")
+    let utc = TimeZone(identifier: "UTC")!
+    try expect(UsageFormatter.creditSummary(credit, timeZone: utc) == "$100 credit · until 5 Nov 07:59", UsageFormatter.creditSummary(credit, timeZone: utc))
+    try expect(UsageFormatter.creditSummary(IncludedCredit(remaining: 62.5, total: 100, expiresAt: nil)) == "$62.50 of $100 credit", "partly spent")
+    try expect(BankedResetParser.claude(usage) == nil, "ineligible banked-reset block shows nothing")
+
+    let spent = Data(#"{"iguana_necktie":{"limit_dollars":100,"used_dollars":100,"remaining_dollars":0,"resets_at":"2026-11-05T07:59:00Z"}}"#.utf8)
+    try expect(BankedResetParser.claudeIncludedCredit(spent) == nil, "fully spent credit is not shown")
+    let locked = Data(#"{"iguana_necktie":{"limit_dollars":100,"remaining_dollars":100,"locked_reason":"plan"}}"#.utf8)
+    try expect(BankedResetParser.claudeIncludedCredit(locked) == nil, "a locked credit is not shown")
+    try expect(BankedResetParser.claudeIncludedCredit(Data("{}".utf8)) == nil, "absent block -> nothing")
+}
+
+func testOpencodeUpdatesStayInInstalledMajor() throws {
+    let releases = Data(#"""
+    [{"tag_name":"v2.2.5"},{"tag_name":"v2.2.4"},{"tag_name":"process-daemon-v0.4.0"},
+     {"tag_name":"v1.20.0-beta.1","prerelease":true},{"tag_name":"v1.19.9","draft":true},
+     {"tag_name":"v1.19.5"},{"tag_name":"v2.2.0"},{"tag_name":"v1.19.4"}]
+    """#.utf8)
+    try expect(CLIVersionParser.newestRelease(from: releases, sameMajorAs: "1.19.4") == "1.19.5", "a 1.x install compares against 1.x only")
+    try expect(CLIVersionParser.newestRelease(from: releases, sameMajorAs: "1.19.5") == "1.19.5", "1.19.5 is current on the 1.x line")
+    try expect(CLIVersionParser.newestRelease(from: releases, sameMajorAs: "2.2.3") == "2.2.5", "a 2.x install compares against 2.x")
+    try expect(CLIVersionParser.newestRelease(from: releases, sameMajorAs: nil) == "2.2.5", "unknown install: newest overall")
+    let snapshot = CLIUpdateSnapshot(installed: [.opencodeFree: "1.19.5"], latest: [.opencodeFree: "1.19.5"])
+    try expect(!snapshot.hasUpdate(for: .opencodeFree), "badge stays green on the newest 1.x")
+}
+
 func testResetLabelsUseAbsoluteResetDates() throws {
     let now = Date(timeIntervalSince1970: 1_000)
     try expect(UsageFormatter.resetLabel(resetAt: now.addingTimeInterval(42 * 60), now: now) == "42m", "42 minute label")
@@ -1958,6 +1996,8 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("Claude included credit from real response", testClaudeIncludedCreditFromRealResponse),
+    ("opencode updates stay in installed major", testOpencodeUpdatesStayInInstalledMajor),
     ("Codex banked reset parsing", testCodexBankedResetParsing),
     ("Claude banked reset parsing", testClaudeBankedResetParsing),
     ("Codex provider attaches resets and caches details", testCodexProviderAttachesResetsAndCachesDetails),

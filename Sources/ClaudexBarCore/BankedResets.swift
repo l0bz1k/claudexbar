@@ -104,13 +104,61 @@ public enum BankedResetParser {
     }
 }
 
+/// A dollar credit included with the plan ("Included credit $100, expires
+/// Nov 5"), separate from pay-as-you-go usage credits.
+public struct IncludedCredit: Equatable, Sendable {
+    public let remaining: Double
+    public let total: Double
+    public let expiresAt: Date?
+
+    public init(remaining: Double, total: Double, expiresAt: Date?) {
+        self.remaining = remaining
+        self.total = total
+        self.expiresAt = expiresAt
+    }
+}
+
+extension BankedResetParser {
+    /// Claude usage response: the included-credit block. Anthropic ships it
+    /// under the opaque key `iguana_necktie` (`limit_dollars`, `used_dollars`,
+    /// `remaining_dollars`, `resets_at` = when the credit lapses), observed
+    /// 2026-11-01. Opaque keys get renamed, so anything unexpected is nil.
+    public static func claudeIncludedCredit(_ usage: Data) -> IncludedCredit? {
+        guard let root = try? JSONSerialization.jsonObject(with: usage) as? [String: Any],
+              let block = root["iguana_necktie"] as? [String: Any],
+              let total = (block["limit_dollars"] as? NSNumber)?.doubleValue, total > 0 else { return nil }
+        let used = (block["used_dollars"] as? NSNumber)?.doubleValue ?? 0
+        let remaining = (block["remaining_dollars"] as? NSNumber)?.doubleValue ?? max(0, total - used)
+        guard remaining > 0, block["locked_reason"] == nil || block["locked_reason"] is NSNull else { return nil }
+        return IncludedCredit(remaining: remaining, total: total, expiresAt: date(block["resets_at"]))
+    }
+}
+
 extension UsageSnapshot {
     public func withResets(_ resets: BankedResets?) -> UsageSnapshot {
-        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets)
+        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit)
+    }
+
+    public func withCredit(_ credit: IncludedCredit?) -> UsageSnapshot {
+        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit)
     }
 }
 
 extension UsageFormatter {
+    /// "$100 credit · until 5 Nov 10:59", or "$62.50 of $100 credit · …".
+    public static func creditSummary(_ credit: IncludedCredit, timeZone: TimeZone = .current) -> String {
+        func money(_ value: Double) -> String {
+            value.rounded() == value ? String(format: "$%.0f", value) : String(format: "$%.2f", value)
+        }
+        let amount = credit.remaining >= credit.total ? money(credit.total) : "\(money(credit.remaining)) of \(money(credit.total))"
+        guard let expiry = credit.expiresAt else { return "\(amount) credit" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "d MMM HH:mm"
+        return "\(amount) credit · until \(formatter.string(from: expiry))"
+    }
+
     /// "2 resets · until 6 Nov 23:44, 30 Nov 20:53".
     public static func resetsSummary(_ resets: BankedResets, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()

@@ -258,6 +258,7 @@ final class StatusBarController: NSObject {
                 case .success(let snapshot):
                     snapshots[provider] = snapshot
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
+                    evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
                     errors[provider] = nil
                     rateLimitBackoff[provider] = nil
                     lastLoggedError[provider] = nil
@@ -527,6 +528,9 @@ final class StatusBarController: NSObject {
         if let resets = snapshot.resets, resets.count > 0 {
             lines.append("Banked resets: " + UsageFormatter.resetsSummary(resets))
         }
+        if let credit = snapshot.credit {
+            lines.append("Included credit: " + UsageFormatter.creditSummary(credit))
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -572,10 +576,45 @@ final class StatusBarController: NSObject {
         // Forget keys of resets that have expired, so the lists don't grow.
         let live = Set(resets.items.map(key))
         let isLive: (String) -> Bool = { k in
-            live.contains(k) || !k.hasPrefix("\(provider.rawValue)|")
+            // Credit keys are managed by the credit notifier, not here.
+            live.contains(k) || !k.hasPrefix("\(provider.rawValue)|") || k.contains("|credit|")
         }
         settings.resetNotifiedKeys = notified.filter(isLive)
         settings.resetExpiryWarnedKeys = warned.filter(isLive)
+    }
+
+    /// Same once-only rules as banked resets: when an included credit
+    /// appears, and a day before it lapses while some of it is unspent.
+    private func evaluateCreditNotifications(provider: ProviderID, credit: IncludedCredit?, now: Date = Date()) {
+        guard let credit else { return }
+        let key = "\(provider.rawValue)|credit|\(Int(credit.expiresAt?.timeIntervalSince1970 ?? 0))|\(Int(credit.total))"
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "d MMM HH:mm"
+        let until = credit.expiresAt.map { " It lapses \(formatter.string(from: $0))." } ?? ""
+
+        var notified = settings.resetNotifiedKeys
+        if !notified.contains(key) {
+            notified.insert(key)
+            settings.resetNotifiedKeys = notified
+            sendResetNotification(
+                id: "credit-new-\(provider.rawValue)",
+                title: "\(provider.displayName): included credit available",
+                body: "\(UsageFormatter.creditSummary(credit)).\(until)"
+            )
+            logger.log(provider: provider, message: "included credit: \(UsageFormatter.creditSummary(credit))")
+        }
+
+        var warned = settings.resetExpiryWarnedKeys
+        if let expiry = credit.expiresAt, expiry > now, expiry.timeIntervalSince(now) <= 24 * 60 * 60, !warned.contains(key) {
+            warned.insert(key)
+            settings.resetExpiryWarnedKeys = warned
+            sendResetNotification(
+                id: "credit-expiry-\(key)",
+                title: "\(provider.displayName): included credit expires in \(UsageFormatter.resetLabel(resetAt: expiry, now: now))",
+                body: "\(UsageFormatter.creditSummary(credit)) — anything unspent is gone after that."
+            )
+        }
     }
 
     private func sendResetNotification(id: String, title: String, body: String) {
@@ -661,6 +700,12 @@ final class StatusBarController: NSObject {
         reauth.keyEquivalentModifierMask = .option
         menu.addItem(reauth)
 
+        if let credit = snapshots[provider]?.credit {
+            let line = NSMenuItem(title: "＄ " + UsageFormatter.creditSummary(credit), action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            line.indentationLevel = 1
+            menu.addItem(line)
+        }
         if let resets = snapshots[provider]?.resets, resets.count > 0 {
             let line = NSMenuItem(title: "↺ " + UsageFormatter.resetsSummary(resets), action: nil, keyEquivalent: "")
             line.isEnabled = false

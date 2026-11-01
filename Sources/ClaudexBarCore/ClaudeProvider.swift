@@ -121,7 +121,8 @@ public struct ClaudeProvider: UsageProvider {
         let response = try await httpClient.data(for: request)
         switch response.statusCode {
         case 200..<300:
-            return .success(try Self.parseUsageResponse(response.data, fetchedAt: now()).withResets(BankedResetParser.claude(response.data)))
+            return .success(try Self.parseUsageResponse(response.data, fetchedAt: now()).withResets(BankedResetParser.claude(response.data))
+                .withCredit(BankedResetParser.claudeIncludedCredit(response.data)))
         case 401:
             guard let refreshToken else { return .failure(.authExpired) }
             do {

@@ -48,9 +48,10 @@ actor CLIUpdateManager {
     private var updateInProgress = false
 
     func snapshot() async -> CLIUpdateSnapshot {
-        async let installed = installedVersions()
-        async let latest = CLILatestVersionChecker().fetchLatestVersions()
-        return await CLIUpdateSnapshot(installed: installed, latest: latest)
+        // Installed first: opencode's "latest" depends on the installed major.
+        let installed = await installedVersions()
+        let latest = await CLILatestVersionChecker().fetchLatestVersions(installed: installed)
+        return CLIUpdateSnapshot(installed: installed, latest: latest)
     }
 
     /// Updates the given CLIs (the user's selection in "CLI Updates").

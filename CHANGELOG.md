@@ -3,6 +3,24 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-11-01
+
+### Added
+- **Claude's included credit** ("Included credit $100, expires Nov 5") under
+  Claude Code in the menu — "＄ $100 credit · until 5 Nov 10:59" — and in the
+  tooltip and Copy Diagnostics, with a notification when it appears and a day
+  before it lapses. It comes from the usage response ClaudexBar already reads.
+
+### Fixed
+- **opencode's version badge compares within your major version.** opencode
+  publishes 1.x and 2.x releases side by side; a 2.x release is not an update
+  for a 1.x install (its `opencode upgrade` never crosses majors without
+  `--major`), so a 1.x install now checks against the newest 1.x only.
+
+### Notes
+- Claude's banked resets aren't shown for this kind of sign-in: Anthropic
+  answers `eligible: false, ineligible_reason: "surface"` to it.
+
 ## [0.8.0] — 2026-11-01
 
 ### Added

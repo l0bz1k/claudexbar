@@ -66,6 +66,9 @@ enum DiagnosticsReport {
                 lines.append("no snapshot yet")
             }
 
+            if let credit = snapshots[provider]?.credit {
+                lines.append("included credit: \(UsageFormatter.creditSummary(credit, timeZone: TimeZone(identifier: "UTC")!)) UTC")
+            }
             if let resets = snapshots[provider]?.resets {
                 lines.append("banked resets: \(UsageFormatter.resetsSummary(resets, timeZone: TimeZone(identifier: "UTC")!)) UTC")
             }

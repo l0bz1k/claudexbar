@@ -83,13 +83,16 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let extraWindows: [UsageWindow]
     /// Banked rate-limit resets the account holds, if the provider reports any.
     public let resets: BankedResets?
+    /// A dollar credit included with the plan and the date it lapses (Claude).
+    public let credit: IncludedCredit?
 
-    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = [], resets: BankedResets? = nil) {
+    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = [], resets: BankedResets? = nil, credit: IncludedCredit? = nil) {
         self.primary = primary
         self.secondary = secondary
         self.fetchedAt = fetchedAt
         self.extraWindows = extraWindows
         self.resets = resets
+        self.credit = credit
     }
 }
 

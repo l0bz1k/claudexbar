@@ -33,6 +33,25 @@ public enum CLIVersionParser {
         return String(text[range])
     }
 
+    /// The newest stable release in a GitHub releases list, restricted to the
+    /// installed major version when known. opencode publishes 1.x and 2.x
+    /// side by side, and its 1.x updater (`opencode upgrade`) never crosses
+    /// to 2.x without `--major` — so a 2.x release is not an update for a
+    /// 1.x install, and must not turn the badge orange.
+    public static func newestRelease(from data: Data, sameMajorAs installed: String?) -> String? {
+        guard let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+        let major = installed.flatMap { $0.split(separator: ".").first.map(String.init) }
+        let versions = releases.compactMap { release -> String? in
+            guard (release["prerelease"] as? Bool) != true, (release["draft"] as? Bool) != true,
+                  let tag = release["tag_name"] as? String,
+                  tag.range(of: #"^v?\d+\.\d+\.\d+$"#, options: .regularExpression) != nil,
+                  let version = semanticVersion(in: tag) else { return nil }
+            if let major, version.split(separator: ".").first.map(String.init) != major { return nil }
+            return version
+        }
+        return versions.max { UpdateChecker.isVersion($1, newerThan: $0) }
+    }
+
     public static func latestVersion(provider: ProviderID, from data: Data) -> String? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -60,11 +79,11 @@ public struct CLILatestVersionChecker: Sendable {
         self.session = session
     }
 
-    public func fetchLatestVersions() async -> [ProviderID: String] {
+    public func fetchLatestVersions(installed: [ProviderID: String] = [:]) async -> [ProviderID: String] {
         await withTaskGroup(of: (ProviderID, String?).self) { group in
             for provider in ProviderID.allCases where provider.hasCLI {
                 group.addTask {
-                    (provider, await latestVersion(for: provider))
+                    (provider, await latestVersion(for: provider, installed: installed[provider]))
                 }
             }
 
@@ -76,7 +95,7 @@ public struct CLILatestVersionChecker: Sendable {
         }
     }
 
-    private func latestVersion(for provider: ProviderID) async -> String? {
+    private func latestVersion(for provider: ProviderID, installed: String?) async -> String? {
         let urlString: String
         switch provider {
         case .claude:
@@ -84,7 +103,7 @@ public struct CLILatestVersionChecker: Sendable {
         case .codex:
             urlString = "https://registry.npmjs.org/%40openai%2Fcodex/latest"
         case .opencodeFree:
-            urlString = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+            urlString = "https://api.github.com/repos/anomalyco/opencode/releases?per_page=50"
         case .openrouter, .opencodeGo:
             return nil
         }
@@ -102,6 +121,9 @@ public struct CLILatestVersionChecker: Sendable {
               (200..<300).contains(http.statusCode)
         else {
             return nil
+        }
+        if provider == .opencodeFree {
+            return CLIVersionParser.newestRelease(from: data, sameMajorAs: installed)
         }
         return CLIVersionParser.latestVersion(provider: provider, from: data)
     }
