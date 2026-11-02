@@ -41,7 +41,9 @@ public struct CodexProvider: UsageProvider {
             switch response.statusCode {
             case 200..<300:
                 let snapshot = try Self.parseUsageResponse(response.data, fetchedAt: Date())
-                return .success(snapshot.withResets(await bankedResets(usage: response.data, template: request)))
+                return .success(snapshot
+                    .withResets(await bankedResets(usage: response.data, template: request))
+                    .withPlan(PlanLabels.codex(fromUsage: response.data)))
             case 401:
                 return .failure(.authExpired)
             case 429:

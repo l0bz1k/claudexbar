@@ -3,6 +3,19 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] — 2026-11-02
+
+### Added
+- **The subscription next to each provider's name** — "Claude Code Pro"
+  (or "Max 5x" / "Max 20x"), "Codex Go". Codex's plan comes with every usage
+  response; Claude's from `/api/oauth/profile`, asked with ClaudexBar's own
+  sign-in at most every 6 hours (never by reading Claude Code's Keychain item).
+
+### Changed
+- A provider that needs an API key you haven't configured (e.g. OpenCode Go
+  without a subscription) is no longer listed in the menu. It's still checked
+  in the background and appears by itself once a key is added.
+
 ## [0.8.1] — 2026-11-01
 
 ### Added

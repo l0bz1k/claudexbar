@@ -7,6 +7,8 @@ public struct ClaudeProvider: UsageProvider {
     private let credentialReader: any ClaudeCredentialReading
     private let httpClient: any HTTPClient
     private let usageURL: URL
+    private let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
+    private let planCache = PlanCache()
     private let refreshURL: URL
     private let now: @Sendable () -> Date
     private let persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)?
@@ -104,6 +106,25 @@ public struct ClaudeProvider: UsageProvider {
         )
     }
 
+    /// The subscription ("Pro", "Max 5x") from `/api/oauth/profile`, asked
+    /// with the same credential that just worked — never by reading another
+    /// app's Keychain item. Fetched at most every 6 hours; a failure keeps the
+    /// last known label.
+    private func planLabel(accessToken: String) async -> String? {
+        if let cached = planCache.fresh() { return cached }
+        var request = URLRequest(url: profileURL)
+        request.setValue("Bearer \(stripBearerPrefix(accessToken))", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.timeoutInterval = 15
+        if let response = try? await httpClient.data(for: request), (200..<300).contains(response.statusCode) {
+            planCache.store(PlanLabels.claude(fromProfile: response.data))
+        } else {
+            planCache.store(nil) // try again after the cache period, keep the last label meanwhile
+        }
+        return planCache.last
+    }
+
     static func isExpired(_ expiresAt: Int?, now: Date) -> Bool {
         guard let expiresAt else { return false }
         let nowMs = Int(now.timeIntervalSince1970 * 1_000)
@@ -121,8 +142,10 @@ public struct ClaudeProvider: UsageProvider {
         let response = try await httpClient.data(for: request)
         switch response.statusCode {
         case 200..<300:
-            return .success(try Self.parseUsageResponse(response.data, fetchedAt: now()).withResets(BankedResetParser.claude(response.data))
-                .withCredit(BankedResetParser.claudeIncludedCredit(response.data)))
+            let snapshot = try Self.parseUsageResponse(response.data, fetchedAt: now())
+                .withResets(BankedResetParser.claude(response.data))
+                .withCredit(BankedResetParser.claudeIncludedCredit(response.data))
+            return .success(snapshot.withPlan(await planLabel(accessToken: accessToken)))
         case 401:
             guard let refreshToken else { return .failure(.authExpired) }
             do {

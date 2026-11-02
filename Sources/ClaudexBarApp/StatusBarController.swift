@@ -256,6 +256,9 @@ final class StatusBarController: NSObject {
                 refreshesInFlight.remove(provider)
                 switch result {
                 case .success(let snapshot):
+                    if let plan = snapshot.plan, plan != snapshots[provider]?.plan {
+                        logger.log(provider: provider, message: "plan: \(plan)")
+                    }
                     snapshots[provider] = snapshot
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
@@ -637,9 +640,10 @@ final class StatusBarController: NSObject {
             menu.addItem(item)
             menu.addItem(.separator())
         }
-        let rows = ProviderID.displayOrder.map { (label: $0.displayName, version: providerVersionBadge($0), hint: providerStatusHint($0)) }
+        let shown = ProviderID.displayOrder.filter(isShownInMenu)
+        let rows = shown.map { (label: providerRowLabel($0), version: providerVersionBadge($0), hint: providerStatusHint($0)) }
         let layout = ProviderRowLayout.make(rows: rows)
-        ProviderID.displayOrder.forEach { appendProviderRow(to: menu, provider: $0, layout: layout) }
+        shown.forEach { appendProviderRow(to: menu, provider: $0, layout: layout) }
         menu.addItem(.separator())
 
         // "Refresh All" by default; holding Option swaps it for "Open Logs…"
@@ -684,7 +688,7 @@ final class StatusBarController: NSObject {
     private func appendProviderRow(to menu: NSMenu, provider: ProviderID, layout: ProviderRowLayout) {
         let row = NSMenuItem()
         row.view = ProviderToggleView(
-            label: provider.displayName,
+            label: providerRowLabel(provider),
             version: providerVersionBadge(provider),
             hint: providerStatusHint(provider),
             layout: layout,
@@ -713,6 +717,20 @@ final class StatusBarController: NSObject {
             line.toolTip = resets.items.compactMap(\.title).first
             menu.addItem(line)
         }
+    }
+
+    /// "Claude Code Pro", "Codex Go": the name plus the subscription, when known.
+    private func providerRowLabel(_ provider: ProviderID) -> String {
+        guard let plan = snapshots[provider]?.plan, !plan.isEmpty else { return provider.displayName }
+        return "\(provider.displayName) \(plan)"
+    }
+
+    /// An API-key provider with no key configured (e.g. OpenCode Go without a
+    /// subscription) stays out of the menu until a key appears — it's still
+    /// polled, so it shows up on its own once you add one.
+    private func isShownInMenu(_ provider: ProviderID) -> Bool {
+        guard !provider.isCodingCLI, snapshots[provider] == nil, case .missingAuth? = errors[provider] else { return true }
+        return false
     }
 
     /// Inline status shown after the provider name: remaining percentages when

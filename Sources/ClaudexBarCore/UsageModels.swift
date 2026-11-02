@@ -85,14 +85,17 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let resets: BankedResets?
     /// A dollar credit included with the plan and the date it lapses (Claude).
     public let credit: IncludedCredit?
+    /// The subscription, ready to show after the provider's name ("Pro", "Max 5x", "Go").
+    public let plan: String?
 
-    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = [], resets: BankedResets? = nil, credit: IncludedCredit? = nil) {
+    public init(primary: UsageWindow?, secondary: UsageWindow?, fetchedAt: Date, extraWindows: [UsageWindow] = [], resets: BankedResets? = nil, credit: IncludedCredit? = nil, plan: String? = nil) {
         self.primary = primary
         self.secondary = secondary
         self.fetchedAt = fetchedAt
         self.extraWindows = extraWindows
         self.resets = resets
         self.credit = credit
+        self.plan = plan
     }
 }
 

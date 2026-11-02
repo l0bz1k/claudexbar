@@ -704,7 +704,9 @@ private final class RoutingHTTPClient: HTTPClient, @unchecked Sendable {
 
     var usageTokens: [String] {
         lock.withLock {
-            requests.filter { $0.httpMethod != "POST" }
+            // Usage requests only: a successful read is followed by a profile
+            // request (the plan label) with the same credential.
+            requests.filter { $0.httpMethod != "POST" && $0.url?.path.hasSuffix("/usage") == true }
                 .compactMap { $0.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") }
         }
     }
@@ -713,6 +715,9 @@ private final class RoutingHTTPClient: HTTPClient, @unchecked Sendable {
         lock.withLock { requests.append(request) }
         if request.httpMethod == "POST" {
             return HTTPResponse(data: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: refreshStatus)
+        }
+        if request.url?.path.hasSuffix("/profile") == true {
+            return HTTPResponse(data: Data(#"{"organization":{"organization_type":"claude_pro"}}"#.utf8), statusCode: 200)
         }
         let token = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
         let status = usageStatusByToken[token] ?? 401
@@ -1345,6 +1350,35 @@ func testOpencodeUpdatesStayInInstalledMajor() throws {
     try expect(CLIVersionParser.newestRelease(from: releases, sameMajorAs: nil) == "2.2.5", "unknown install: newest overall")
     let snapshot = CLIUpdateSnapshot(installed: [.opencodeFree: "1.19.5"], latest: [.opencodeFree: "1.19.5"])
     try expect(!snapshot.hasUpdate(for: .opencodeFree), "badge stays green on the newest 1.x")
+}
+
+// MARK: - v0.8.2: plan labels, hidden key-less providers
+
+func testPlanLabels() throws {
+    try expect(PlanLabels.codex(fromUsage: realCodexUsageWithResets) == "Go", "Codex plan_type go -> Go")
+    try expect(PlanLabels.codex("prolite") == "Pro Lite" && PlanLabels.codex("plus") == "Plus" && PlanLabels.codex("unknown") == nil, "Codex labels")
+    try expect(PlanLabels.claude(organizationType: "claude_pro", rateLimitTier: "default_claude_ai") == "Pro", "Claude Pro")
+    try expect(PlanLabels.claude(organizationType: "claude_max", rateLimitTier: "default_claude_max_5x") == "Max 5x", "Max 5x")
+    try expect(PlanLabels.claude(organizationType: "claude_max", rateLimitTier: "default_claude_max_20x") == "Max 20x", "Max 20x")
+    try expect(PlanLabels.claude(organizationType: nil, rateLimitTier: nil, hasPro: true) == "Pro", "account flags as fallback")
+    let profile = Data(#"{"account":{"uuid":"a","has_claude_pro":true,"has_claude_max":false},"organization":{"uuid":"o","organization_type":"claude_pro","rate_limit_tier":"default_claude_ai","billing_type":"stripe_subscription"}}"#.utf8)
+    try expect(PlanLabels.claude(fromProfile: profile) == "Pro", "profile response")
+}
+
+func testProvidersCarryPlanLabels() throws {
+    let codexHTTP = PathRoutingHTTPClient(["/backend-api/wham/usage": realCodexUsageWithResets, "/backend-api/wham/rate-limit-reset-credits": realCodexResetDetails])
+    guard case .success(let codex) = runBlocking({ await CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: codexHTTP).fetchUsage() }) else { throw TestFailure(description: "codex") }
+    try expect(codex.plan == "Go", "Codex snapshot carries its plan")
+
+    let usage = Data(#"{"five_hour":{"utilization":10,"resets_at":"2026-11-02T20:00:00Z"},"seven_day":{"utilization":5,"resets_at":"2026-11-05T20:00:00Z"}}"#.utf8)
+    let profile = Data(#"{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x"}}"#.utf8)
+    let http = PathRoutingHTTPClient(["/api/oauth/usage": usage, "/api/oauth/profile": profile])
+    let reader = StubClaudeReader([ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "t", refreshToken: nil, expiresAt: futureMillis), source: .claudeCode)])
+    let claude = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { _ in })
+    guard case .success(let first) = runBlocking({ await claude.fetchUsage() }) else { throw TestFailure(description: "claude") }
+    try expect(first.plan == "Max 5x", "Claude plan from the profile: \(String(describing: first.plan))")
+    _ = runBlocking { await claude.fetchUsage() }
+    try expect(http.count("/api/oauth/profile") == 1, "profile is cached, not fetched every poll")
 }
 
 func testResetLabelsUseAbsoluteResetDates() throws {
@@ -1996,6 +2030,8 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("plan labels", testPlanLabels),
+    ("providers carry plan labels", testProvidersCarryPlanLabels),
     ("Claude included credit from real response", testClaudeIncludedCreditFromRealResponse),
     ("opencode updates stay in installed major", testOpencodeUpdatesStayInInstalledMajor),
     ("Codex banked reset parsing", testCodexBankedResetParsing),

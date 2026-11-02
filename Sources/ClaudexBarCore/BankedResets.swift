@@ -136,11 +136,15 @@ extension BankedResetParser {
 
 extension UsageSnapshot {
     public func withResets(_ resets: BankedResets?) -> UsageSnapshot {
-        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit)
+        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit, plan: plan)
     }
 
     public func withCredit(_ credit: IncludedCredit?) -> UsageSnapshot {
-        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit)
+        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit, plan: plan)
+    }
+
+    public func withPlan(_ plan: String?) -> UsageSnapshot {
+        UsageSnapshot(primary: primary, secondary: secondary, fetchedAt: fetchedAt, extraWindows: extraWindows, resets: resets, credit: credit, plan: plan)
     }
 }
 
