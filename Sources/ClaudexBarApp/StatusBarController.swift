@@ -272,7 +272,16 @@ final class StatusBarController: NSObject {
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
                     errors[provider] = nil
-                    rateLimitBackoff[provider] = nil
+                    // After rate limits, speed back up one step per success
+                    // instead of jumping straight to the base interval (which
+                    // just runs into the limit again — Claude's usage endpoint
+                    // allows only a few calls).
+                    if let strikes = rateLimitBackoff[provider]?.strikes, strikes > 1 {
+                        let delay = min(10 * 60, settings.refreshInterval * pow(2, Double(strikes - 1)))
+                        rateLimitBackoff[provider] = (Date().addingTimeInterval(delay), strikes - 1)
+                    } else {
+                        rateLimitBackoff[provider] = nil
+                    }
                     lastLoggedError[provider] = nil
                     usageDeltaTracker.record(provider: provider, snapshot: snapshot)
                     logger.log(provider: provider, message: "usage ok")
@@ -299,8 +308,30 @@ final class StatusBarController: NSObject {
         }
     }
 
+    /// The last snapshot still counts as current data: fetched since launch,
+    /// and either no error since, or only a rate limit (the service answered,
+    /// it just won't hand out a new reading yet) within the last 15 minutes.
+    /// Network and server errors make it "last known data" right away.
+    private func isCurrent(_ provider: ProviderID, now: Date = Date()) -> Bool {
+        guard let snapshot = snapshots[provider], freshProviders.contains(provider) else { return false }
+        switch errors[provider] {
+        case nil: return true
+        case .rateLimited?: return now.timeIntervalSince(snapshot.fetchedAt) < 15 * 60
+        default: return false
+        }
+    }
+
     private func refreshActiveProvider(notify: Bool = true) {
         guard let provider = activeEnabledProvider else {
+            updateImage()
+            return
+        }
+        // Everything is polled in the background; switching the tray to a
+        // provider with a reading from this polling round needs no extra call
+        // (an extra call is what trips Claude's usage rate limit).
+        if errors[provider] == nil, freshProviders.contains(provider),
+           let fetchedAt = snapshots[provider]?.fetchedAt,
+           Date().timeIntervalSince(fetchedAt) < settings.refreshInterval {
             updateImage()
             return
         }
@@ -550,7 +581,7 @@ final class StatusBarController: NSObject {
         let error = errors[activeProvider]
         if let snapshot = snapshots[activeProvider], error == nil || error!.isTransient {
             let now = Date()
-            let stale = error != nil || !freshProviders.contains(activeProvider)
+            let stale = !isCurrent(activeProvider)
             button.image = StatusPillRenderer.image(
                 provider: activeProvider,
                 snapshot: snapshot,
@@ -566,6 +597,10 @@ final class StatusBarController: NSObject {
                 clock.dateFormat = "d MMM HH:mm"
                 let why = error.map { $0.sanitizedDescription } ?? "waiting for the first answer since launch"
                 tip = "Last known data, as of \(clock.string(from: snapshot.fetchedAt)) — \(why)\n" + tip
+            } else if error == .rateLimited {
+                let clock = DateFormatter()
+                clock.dateFormat = "HH:mm"
+                tip = "As of \(clock.string(from: snapshot.fetchedAt)) — the usage endpoint is rate limiting, retrying later\n" + tip
             }
             button.toolTip = tip
             return
@@ -926,7 +961,7 @@ final class StatusBarController: NSObject {
         }
         // The menu tells it straight: an error shows its status word ("net");
         // the tray keeps showing the last numbers, dimmed.
-        if let snapshot = snapshots[provider], errors[provider] == nil {
+        if let snapshot = snapshots[provider], errors[provider] == nil || isCurrent(provider) {
             let first = UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)
             if snapshot.secondary == nil, provider == .opencodeFree {
                 return .figure(first) // a single window: no second column

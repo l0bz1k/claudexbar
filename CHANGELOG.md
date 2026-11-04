@@ -3,6 +3,21 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.2] — 2026-11-04
+
+### Fixed
+- **Claude turning "net"/dimmed after switching the tray.** Claude's usage
+  endpoint allows only a few calls; clicking the tray to switch providers sent
+  an extra request that ran into its rate limit, and a rate limit was shown
+  like a lost connection. Now:
+  - switching to a provider whose data is from the current polling round
+    sends no request;
+  - a rate limit keeps the reading current for up to 15 minutes — normal
+    opacity in the tray, figures in the menu, "as of HH:mm" in the tooltip;
+    network and server errors still dim right away;
+  - after rate limits, polling speeds back up one step per success instead of
+    jumping straight to every minute and hitting the limit again.
+
 ## [0.10.1] — 2026-11-04
 
 The rest of the code-review fixes.
