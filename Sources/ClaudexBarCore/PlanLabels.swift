@@ -52,22 +52,36 @@ public enum PlanLabels {
 }
 
 /// The last plan label fetched, reused for a while: plans change rarely.
-final class PlanCache: @unchecked Sendable {
+/// Tied to the credential it was fetched with — after signing in to another
+/// account the old account's plan is neither reused nor kept as a fallback.
+public final class PlanCache: @unchecked Sendable {
     private let lock = NSLock()
     private var label: String?
+    private var key: String?
     private var fetchedAt = Date.distantPast
     private let maxAge: TimeInterval = 6 * 60 * 60
 
-    func fresh(now: Date = Date()) -> String?? {
-        lock.withLock { now.timeIntervalSince(fetchedAt) < maxAge ? .some(label) : .none }
+    public init() {}
+
+    public func fresh(key: String, now: Date = Date()) -> String?? {
+        lock.withLock { self.key == key && now.timeIntervalSince(fetchedAt) < maxAge ? .some(label) : .none }
     }
 
-    var last: String? { lock.withLock { label } }
+    public func last(key: String) -> String? { lock.withLock { self.key == key ? label : nil } }
 
-    func store(_ label: String?, now: Date = Date()) {
+    public func store(_ label: String?, key: String, now: Date = Date()) {
         lock.withLock {
+            if self.key != key { self.label = nil }
+            self.key = key
             if let label { self.label = label }
             fetchedAt = now
         }
+    }
+
+    /// A short, non-reversible tag for a credential (never stored).
+    public static func tag(_ secret: String) -> String {
+        var hasher = Hasher()
+        hasher.combine(secret)
+        return String(hasher.finalize(), radix: 36)
     }
 }

@@ -145,10 +145,12 @@ public enum UsageError: Error, Equatable, Sendable {
     /// The provider's CDN (Cloudflare) refused this network, typically the
     /// exit IP of a VPN/proxy. Not the API, and not the credential.
     case blockedByEdge(ip: String?)
+    /// The CLI keeps its login where ClaudexBar can't read it.
+    case unsupportedCredentialStore(String)
 
     public var statusLabel: String {
         switch self {
-        case .missingAuth, .authExpired, .refreshFailed:
+        case .missingAuth, .authExpired, .refreshFailed, .unsupportedCredentialStore:
             return "auth"
         case .network, .rateLimited:
             return "net"
@@ -168,7 +170,7 @@ public enum UsageError: Error, Equatable, Sendable {
             return true
         // A block persists until the route changes; showing stale numbers
         // without saying so would hide that.
-        case .missingAuth, .authExpired, .refreshFailed, .decoding, .keychain, .blockedByEdge:
+        case .missingAuth, .authExpired, .refreshFailed, .decoding, .keychain, .blockedByEdge, .unsupportedCredentialStore:
             return false
         }
     }
@@ -194,6 +196,8 @@ public enum UsageError: Error, Equatable, Sendable {
         case .blockedByEdge(let ip):
             let address = ip.map { " IP \($0)" } ?? " this network's IP"
             return "Blocked by Cloudflare for\(address) — likely the VPN/proxy exit; try another node"
+        case .unsupportedCredentialStore(let message):
+            return message
         }
     }
 }

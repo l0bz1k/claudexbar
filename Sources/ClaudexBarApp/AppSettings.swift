@@ -175,6 +175,16 @@ final class AppSettings {
         defaults.set(date, forKey: "goldenAnchoredFor.\(provider.rawValue)")
     }
 
+    /// When golden-hour planning last looked at this provider — a gap that
+    /// covers an anchor time means the Mac slept through it.
+    func goldenLastSeen(_ provider: ProviderID) -> Date? {
+        defaults.object(forKey: "goldenLastSeen.\(provider.rawValue)") as? Date
+    }
+
+    func setGoldenLastSeen(_ date: Date?, for provider: ProviderID) {
+        defaults.set(date, forKey: "goldenLastSeen.\(provider.rawValue)")
+    }
+
     /// The golden time a "can't make it today" notification was last sent for.
     func goldenMissNotifiedFor(_ provider: ProviderID) -> Date? {
         defaults.object(forKey: "goldenMissNotifiedFor.\(provider.rawValue)") as? Date

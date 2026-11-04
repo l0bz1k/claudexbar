@@ -353,7 +353,14 @@ final class StatusBarController: NSObject {
                 }
                 return
             case .anchorNow:
-                if now >= plan.anchor { goldenTarget = plan.reset }
+                // Late by more than the tolerance (asleep at the anchor
+                // time): the reset won't land on the golden time, so it's an
+                // ordinary anchor — the miss was reported on wake.
+                if now >= plan.anchor, !GoldenHourPlanner.isLateAnchor(golden: golden, windowDuration: duration, now: now) {
+                    goldenTarget = plan.reset
+                } else if now >= plan.anchor {
+                    logger.log(provider: provider, message: "golden hour: anchor time \(Self.clock(plan.anchor)) passed while asleep — anchoring as usual, reset at \(Self.clock(now.addingTimeInterval(duration)))")
+                }
             }
         }
 
@@ -429,6 +436,8 @@ final class StatusBarController: NSObject {
         goldenAnchorTimers.values.forEach { $0.timer.invalidate() }
         goldenAnchorTimers = [:]
         goldenHoldLogged = [:]
+        // A new schedule: an earlier gap isn't a miss of it.
+        ProviderID.allCases.forEach { settings.setGoldenLastSeen(nil, for: $0) }
     }
 
     /// At the anchor time, a window that's already running (you were working,
@@ -436,14 +445,23 @@ final class StatusBarController: NSObject {
     /// carry on with the regular schedule until the next day.
     private func checkGoldenHourMissed(provider: ProviderID, snapshot: UsageSnapshot) {
         let now = Date()
+        if let golden = activeGoldenHour, let duration = snapshot.primary?.windowDuration {
+            checkGoldenHourSleptThrough(provider: provider, golden: golden, duration: duration, snapshot: snapshot, now: now)
+            settings.setGoldenLastSeen(now, for: provider)
+        }
         guard let golden = activeGoldenHour,
               let window = snapshot.primary,
               let duration = window.windowDuration,
               let reset = window.resetAt,
               UsageFormatter.hasStarted(window, now: now) else { return }
         let plan = GoldenHourPlanner.anchorTime(golden, windowDuration: duration, after: now)
-        guard now >= plan.anchor,
-              settings.goldenAnchoredFor(provider) != plan.reset,
+        guard now >= plan.anchor, settings.goldenAnchoredFor(provider) != plan.reset else { return }
+        if abs(reset.timeIntervalSince(plan.reset)) <= 10 * 60 {
+            // Already running and resetting on time anyway: counts as met.
+            settings.setGoldenAnchoredFor(plan.reset, for: provider)
+            return
+        }
+        guard settings.goldenMissNotifiedFor(provider) != plan.reset,
               settings.goldenMissNotifiedFor(provider) != plan.reset,
               GoldenHourPlanner.isMissed(golden: golden, windowDuration: duration, runningWindowResetsAt: reset, now: now) else { return }
         settings.setGoldenMissNotifiedFor(plan.reset, for: provider)
@@ -452,6 +470,31 @@ final class StatusBarController: NSObject {
         let content = UNMutableNotificationContent()
         content.title = "AI Golden Hour"
         content.body = "\(provider.displayName) can’t reset at \(Self.clock(plan.reset)) today: a window is already running and resets at \(Self.clock(reset)). Back on schedule tomorrow."
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "golden-miss-\(provider.rawValue)", content: content, trigger: nil))
+    }
+
+    /// The Mac was asleep (or the app not running) at the anchor time, so
+    /// the window couldn't be started on time: say so once, then carry on
+    /// with the regular schedule.
+    private func checkGoldenHourSleptThrough(provider: ProviderID, golden: GoldenHour, duration: TimeInterval, snapshot: UsageSnapshot, now: Date) {
+        guard let target = GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: duration, lastSeen: settings.goldenLastSeen(provider), now: now),
+              settings.goldenAnchoredFor(provider) != target.reset,
+              settings.goldenMissNotifiedFor(provider) != target.reset else { return }
+        // A window that was running anyway and resets on time is not a miss.
+        if let window = snapshot.primary, let reset = window.resetAt,
+           UsageFormatter.hasStarted(window, now: now), abs(reset.timeIntervalSince(target.reset)) <= 10 * 60 {
+            settings.setGoldenAnchoredFor(target.reset, for: provider)
+            return
+        }
+        settings.setGoldenMissNotifiedFor(target.reset, for: provider)
+        let passed = now >= target.reset
+        logger.log(provider: provider, message: "golden hour: asleep at the anchor time \(Self.clock(target.anchor)) — \(Self.clock(target.reset)) \(passed ? "was missed" : "can't be reached")")
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "AI Golden Hour"
+        content.body = passed
+            ? "\(provider.displayName) missed the \(Self.clock(target.reset)) reset: the Mac was asleep at \(Self.clock(target.anchor)), when the window had to start. Back on schedule next time."
+            : "\(provider.displayName) won’t reset at \(Self.clock(target.reset)): the Mac was asleep at \(Self.clock(target.anchor)), when the window had to start, so it resets later today."
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "golden-miss-\(provider.rawValue)", content: content, trigger: nil))
     }
 
@@ -1215,8 +1258,8 @@ final class StatusBarController: NSObject {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = ["login"]
-        process.environment = ProcessInfo.processInfo.environment.merging(
-            ["CODEX_HOME": FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex").path]
+        process.environment = ProcessRunner.cliEnvironment.merging(
+            ["CODEX_HOME": CodexHome.resolve().path]
         ) { _, new in new }
         let outputPipe = Pipe()
         let errorPipe = Pipe()

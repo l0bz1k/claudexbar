@@ -65,6 +65,40 @@ public enum GoldenHourPlanner {
         return .holdUntil(anchor)
     }
 
+    /// An anchor sent more than `tolerance` after the planned anchor time
+    /// (the Mac slept through it) resets that much past the golden time, so
+    /// it no longer counts as hitting it.
+    public static func isLateAnchor(golden: GoldenHour, windowDuration: TimeInterval, now: Date, tolerance: TimeInterval = 10 * 60, calendar: Calendar = .current) -> Bool {
+        let (anchor, _) = anchorTime(golden, windowDuration: windowDuration, after: now, calendar: calendar)
+        return now > anchor.addingTimeInterval(tolerance)
+    }
+
+    /// The most recent golden time whose anchor moment (anchor + tolerance)
+    /// has already passed by `now`.
+    public static func latestPassedTarget(_ golden: GoldenHour, windowDuration: TimeInterval, now: Date, tolerance: TimeInterval = 10 * 60, calendar: Calendar = .current) -> (anchor: Date, reset: Date)? {
+        var candidate = nextGoldenTime(golden, after: now.addingTimeInterval(-3 * 24 * 60 * 60), calendar: calendar)
+        var latest: (Date, Date)?
+        for _ in 0..<8 {
+            let anchor = candidate.addingTimeInterval(-windowDuration)
+            guard anchor.addingTimeInterval(tolerance) <= now else { break }
+            latest = (anchor, candidate)
+            candidate = nextGoldenTime(golden, after: candidate, calendar: calendar)
+        }
+        return latest
+    }
+
+    /// When ClaudexBar last checked at `lastSeen` and the next check is
+    /// `now`, did an anchor moment fall in between (Mac asleep, app not
+    /// running)? Returns that target, which then couldn't be met on time.
+    public static func sleptThroughAnchor(golden: GoldenHour, windowDuration: TimeInterval, lastSeen: Date?, now: Date, tolerance: TimeInterval = 10 * 60, calendar: Calendar = .current) -> (anchor: Date, reset: Date)? {
+        // A gap longer than a day and a half is the app having been off or
+        // the feature unused, not a nap — nothing to report.
+        guard let lastSeen, now.timeIntervalSince(lastSeen) < 36 * 60 * 60,
+              let target = latestPassedTarget(golden, windowDuration: windowDuration, now: now, tolerance: tolerance, calendar: calendar),
+              lastSeen < target.anchor else { return nil }
+        return target
+    }
+
     /// True when a window that is already running at the anchor time won't
     /// reset at (or within `tolerance` of) the golden time — today's golden
     /// hour can't be reached.

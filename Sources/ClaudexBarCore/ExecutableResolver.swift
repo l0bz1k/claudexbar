@@ -9,6 +9,13 @@ import Foundation
 public enum ExecutableResolver {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var loginShellDirectories: [String]?
+    nonisolated(unsafe) private static var loginShellCodexHome: String?
+
+    /// `CODEX_HOME` as the user's login shell sets it (an app started by
+    /// launchd doesn't inherit it). nil until read, or when unset.
+    public static func cachedLoginShellCodexHome() -> String? {
+        lock.withLock { loginShellCodexHome }
+    }
 
     /// Directories to search, most specific first.
     public static func searchDirectories(home: String = FileManager.default.homeDirectoryForCurrentUser.path,
@@ -64,14 +71,18 @@ public enum ExecutableResolver {
             let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
             let result = await ProcessRunner.run(
                 executable: URL(fileURLWithPath: shell),
-                arguments: ["-l", "-c", #"printf %s "$PATH""#],
+                arguments: ["-l", "-c", #"printf '%s\n%s' "$PATH" "$CODEX_HOME""#],
                 environment: ProcessInfo.processInfo.environment,
                 timeout: 10
             )
-            let dirs = result.succeeded
-                ? result.stdout.split(separator: ":").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { $0.hasPrefix("/") }
-                : []
-            lock.withLock { loginShellDirectories = dirs }
+            let lines = result.succeeded ? result.stdout.components(separatedBy: "\n") : []
+            let dirs = (lines.first ?? "").split(separator: ":")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { $0.hasPrefix("/") }
+            let codexHome = lines.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines)
+            lock.withLock {
+                loginShellDirectories = dirs
+                loginShellCodexHome = (codexHome?.isEmpty ?? true) ? nil : codexHome
+            }
         }
     }
 }

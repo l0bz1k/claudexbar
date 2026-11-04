@@ -2205,7 +2205,70 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
     try expect(decisions.first?.provider == .claude, "inactive Claude recovery provider")
 }
 
+
+// MARK: - v0.10.1: Golden Hour on wake, CODEX_HOME, per-account caches
+
+func testGoldenHourLateAnchorAndSleptThrough() throws {
+    let golden = GoldenHour(hour: 14, minute: 0)
+    let five: TimeInterval = 5 * 3600
+    try expect(!GoldenHourPlanner.isLateAnchor(golden: golden, windowDuration: five, now: msk(2, 9, 5), calendar: moscow), "5 min after the anchor is still on time")
+    try expect(GoldenHourPlanner.isLateAnchor(golden: golden, windowDuration: five, now: msk(2, 11), calendar: moscow), "2 h after the anchor is late")
+    try expect(!GoldenHourPlanner.isLateAnchor(golden: golden, windowDuration: five, now: msk(2, 8), calendar: moscow), "before the anchor is not late")
+    // Asleep 07:00 -> 11:00: the 09:00 anchor fell in the gap.
+    let slept = GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: msk(2, 7), now: msk(2, 11), calendar: moscow)
+    try expect(slept?.anchor == msk(2, 9) && slept?.reset == msk(2, 14), "gap over the anchor is reported: \(String(describing: slept))")
+    // Asleep through the golden time itself: still that day's target.
+    let missed = GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: msk(2, 7), now: msk(2, 16), calendar: moscow)
+    try expect(missed?.reset == msk(2, 14), "slept through 14:00 too: that target was missed")
+    try expect(GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: msk(2, 9, 2), now: msk(2, 11), calendar: moscow) == nil, "awake at the anchor: nothing to report")
+    try expect(GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: msk(2, 8, 58), now: msk(2, 9, 5), calendar: moscow) == nil, "a short gap within the tolerance is fine")
+    try expect(GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: nil, now: msk(2, 11), calendar: moscow) == nil, "first look: nothing to compare")
+    try expect(GoldenHourPlanner.sleptThroughAnchor(golden: golden, windowDuration: five, lastSeen: msk(1, 3), now: msk(3, 11), calendar: moscow) == nil, "days off: not a nap")
+    // Overnight Mac sleep with an early golden hour (anchor the evening before).
+    let early = GoldenHour(hour: 2, minute: 0)
+    let night = GoldenHourPlanner.sleptThroughAnchor(golden: early, windowDuration: five, lastSeen: msk(1, 20), now: msk(2, 8), calendar: moscow)
+    try expect(night?.anchor == msk(1, 21) && night?.reset == msk(2, 2), "anchor at 21:00 the day before: \(String(describing: night))")
+}
+
+func testCodexHomeResolution() throws {
+    let home = URL(fileURLWithPath: "/Users/someone")
+    try expect(CodexHome.resolve(environment: [:], loginShell: nil, home: home).path == "/Users/someone/.codex", "default ~/.codex")
+    try expect(CodexHome.resolve(environment: ["CODEX_HOME": "/data/codex"], loginShell: "/other", home: home).path == "/data/codex", "app environment wins")
+    try expect(CodexHome.resolve(environment: [:], loginShell: "~/work/.codex", home: home).path == "/Users/someone/work/.codex", "login shell value, ~ expanded")
+    try expect(CodexHome.resolve(environment: ["CODEX_HOME": "  "], loginShell: nil, home: home).path == "/Users/someone/.codex", "blank is ignored")
+
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("codexhome-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try expect(CodexHome.credentialStore(home: dir) == nil, "no config: default file store")
+    try "model = \"gpt\"\ncli_auth_credentials_store = \"keyring\"\n\n[profiles.x]\ncli_auth_credentials_store = \"file\"\n".write(to: dir.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+    try expect(CodexHome.credentialStore(home: dir) == "keyring", "top-level store read, table keys ignored")
+    try "[profiles.x]\ncli_auth_credentials_store = \"keyring\"\n".write(to: dir.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+    try expect(CodexHome.credentialStore(home: dir) == nil, "a key inside a table isn't the top-level setting")
+
+    let reader = CodexAuthReader(authURL: dir.appendingPathComponent("auth.json"))
+    do { _ = try reader.readAccessToken(); try expect(false, "missing auth.json must throw") }
+    catch let error as UsageError { try expect(error == .missingAuth, "fixed path without file -> missingAuth") }
+    try expect(UsageError.unsupportedCredentialStore("x").statusLabel == "auth" && !UsageError.unsupportedCredentialStore("x").isTransient, "keyring store reads as an auth problem")
+}
+
+func testPlanCacheIsPerCredential() throws {
+    let cache = PlanCache()
+    let a = PlanCache.tag("token-a"), b = PlanCache.tag("token-b")
+    try expect(a != b && a == PlanCache.tag("token-a"), "tags are stable and distinct")
+    cache.store("Pro", key: a)
+    try expect(cache.fresh(key: a) == .some("Pro"), "same credential: cached")
+    try expect(cache.fresh(key: b) == nil, "another credential: fetch again")
+    cache.store(nil, key: b) // the other account's profile fetch failed
+    try expect(cache.last(key: b) == nil, "no carry-over of the first account's plan")
+    cache.store(nil, key: b)
+    try expect(cache.last(key: b) == nil && cache.last(key: a) == nil, "old account forgotten")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("golden hour late anchor and slept-through", testGoldenHourLateAnchorAndSleptThrough),
+    ("CODEX_HOME resolution and keyring store", testCodexHomeResolution),
+    ("plan cache is per credential", testPlanCacheIsPerCredential),
     ("availability states are not percentages", testAvailabilityStatesAreNotPercentages),
     ("preemptive refresh never reuses the spent token", testPreemptiveRefreshNeverReusesTheSpentToken),
     ("Claude without weekly window has no fake zero", testClaudeWithoutWeeklyWindowHasNoFakeZero),

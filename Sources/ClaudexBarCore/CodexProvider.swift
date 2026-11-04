@@ -70,11 +70,13 @@ public struct CodexProvider: UsageProvider {
     /// the last details — or shows just the count.
     private func bankedResets(usage: Data, template: URLRequest) async -> BankedResets? {
         guard let count = BankedResetParser.codexCount(usage) else { return nil }
+        // Per account: another sign-in's reset dates are never shown.
+        let account = PlanCache.tag(template.value(forHTTPHeaderField: "chatgpt-account-id") ?? template.value(forHTTPHeaderField: "Authorization") ?? "")
         guard count > 0 else {
-            resetCache.store(count: 0, items: [])
+            resetCache.store(count: 0, items: [], account: account)
             return nil
         }
-        if let cached = resetCache.fresh(count: count) {
+        if let cached = resetCache.fresh(count: count, account: account) {
             return BankedResets(count: count, items: cached)
         }
         var request = template
@@ -82,10 +84,10 @@ public struct CodexProvider: UsageProvider {
         if let response = try? await httpClient.data(for: request),
            (200..<300).contains(response.statusCode),
            let items = BankedResetParser.codexDetails(response.data) {
-            resetCache.store(count: count, items: items)
+            resetCache.store(count: count, items: items, account: account)
             return BankedResets(count: count, items: items)
         }
-        return BankedResets(count: count, items: resetCache.stale() ?? [])
+        return BankedResets(count: count, items: resetCache.stale(account: account) ?? [])
     }
 
     public static func parseUsageResponse(_ data: Data, fetchedAt: Date) throws -> UsageSnapshot {
@@ -225,19 +227,21 @@ final class ResetDetailCache: @unchecked Sendable {
     private let lock = NSLock()
     private var count = -1
     private var items: [BankedReset] = []
+    private var account: String?
     private var fetchedAt = Date.distantPast
     private let maxAge: TimeInterval = 6 * 60 * 60
 
-    func fresh(count: Int, now: Date = Date()) -> [BankedReset]? {
-        lock.withLock { self.count == count && now.timeIntervalSince(fetchedAt) < maxAge ? items : nil }
+    func fresh(count: Int, account: String, now: Date = Date()) -> [BankedReset]? {
+        lock.withLock { self.account == account && self.count == count && now.timeIntervalSince(fetchedAt) < maxAge ? items : nil }
     }
 
-    func stale() -> [BankedReset]? {
-        lock.withLock { count >= 0 ? items : nil }
+    func stale(account: String) -> [BankedReset]? {
+        lock.withLock { self.account == account && count >= 0 ? items : nil }
     }
 
-    func store(count: Int, items: [BankedReset], now: Date = Date()) {
+    func store(count: Int, items: [BankedReset], account: String, now: Date = Date()) {
         lock.withLock {
+            self.account = account
             self.count = count
             self.items = items
             self.fetchedAt = now

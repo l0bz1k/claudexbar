@@ -43,7 +43,14 @@ public enum ProcessRunner {
         // The same directories the CLIs are found in, so a CLI installed with
         // e.g. nvm also finds its `node`.
         let path = ExecutableResolver.searchDirectories().joined(separator: ":")
-        return ProcessInfo.processInfo.environment.merging(["PATH": path]) { _, new in new }
+        var extra = ["PATH": path]
+        // Codex started from here uses the same state directory ClaudexBar
+        // reads (the login shell's CODEX_HOME isn't inherited by the app).
+        if ProcessInfo.processInfo.environment["CODEX_HOME"] == nil,
+           ExecutableResolver.cachedLoginShellCodexHome() != nil {
+            extra["CODEX_HOME"] = CodexHome.resolve().path
+        }
+        return ProcessInfo.processInfo.environment.merging(extra) { _, new in new }
     }
 
     /// SIGTERM to the process and everything it started (a CLI's workers

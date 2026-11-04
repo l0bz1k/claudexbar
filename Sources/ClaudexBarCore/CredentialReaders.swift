@@ -15,15 +15,60 @@ extension CodexAuthReading {
     public func readAccountID() -> String? { nil }
 }
 
-public struct CodexAuthReader: CodexAuthReading {
-    private let authURL: URL
+/// Where Codex keeps its state: `CODEX_HOME` (from the app's environment,
+/// else from the user's login shell), else `~/.codex` — the same rule the
+/// CLI follows.
+public enum CodexHome {
+    public static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment,
+                               loginShell: String? = ExecutableResolver.cachedLoginShellCodexHome(),
+                               home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        let raw = [environment["CODEX_HOME"], loginShell].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        guard let raw else { return home.appendingPathComponent(".codex") }
+        if raw == "~" { return home }
+        if raw.hasPrefix("~/") { return home.appendingPathComponent(String(raw.dropFirst(2))) }
+        return URL(fileURLWithPath: raw)
+    }
 
-    public init(authURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json")) {
-        self.authURL = authURL
+    /// Codex's `cli_auth_credentials_store` ("file", "keyring", "auto"), from
+    /// its config.toml; nil when not set (the default is a file).
+    public static func credentialStore(home: URL = resolve()) -> String? {
+        guard let text = try? String(contentsOf: home.appendingPathComponent("config.toml"), encoding: .utf8) else { return nil }
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") { break } // only top-level keys
+            guard trimmed.hasPrefix("cli_auth_credentials_store"), let eq = trimmed.firstIndex(of: "=") else { continue }
+            return trimmed[trimmed.index(after: eq)...]
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                .lowercased()
+        }
+        return nil
+    }
+}
+
+public struct CodexAuthReader: CodexAuthReading {
+    private let fixedAuthURL: URL?
+
+    /// Without `authURL`, the location is resolved at each read (CODEX_HOME
+    /// may only become known once the login shell has been read).
+    public init(authURL: URL? = nil) {
+        self.fixedAuthURL = authURL
+    }
+
+    private var authURL: URL {
+        fixedAuthURL ?? CodexHome.resolve().appendingPathComponent("auth.json")
     }
 
     public func readAccessToken() throws -> String {
-        guard let tokens = readTokens(),
+        guard let tokens = readTokens() else {
+            // No file: tell a keychain-stored login apart from no login.
+            if fixedAuthURL == nil, let store = CodexHome.credentialStore(), store == "keyring" || store == "auto" {
+                throw UsageError.unsupportedCredentialStore("Codex keeps its login in the system keychain (cli_auth_credentials_store = \"\(store)\"); ClaudexBar reads it from auth.json — set the store to \"file\" and run `codex login` again")
+            }
+            throw UsageError.missingAuth
+        }
+        guard let token = tokens["access_token"] as? String,
               let token = tokens["access_token"] as? String,
               !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {

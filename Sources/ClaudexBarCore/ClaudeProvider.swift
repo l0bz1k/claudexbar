@@ -117,18 +117,19 @@ public struct ClaudeProvider: UsageProvider {
     /// app's Keychain item. Fetched at most every 6 hours; a failure keeps the
     /// last known label.
     private func planLabel(accessToken: String) async -> String? {
-        if let cached = planCache.fresh() { return cached }
+        let key = PlanCache.tag(stripBearerPrefix(accessToken))
+        if let cached = planCache.fresh(key: key) { return cached }
         var request = URLRequest(url: profileURL)
         request.setValue("Bearer \(stripBearerPrefix(accessToken))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.timeoutInterval = 15
         if let response = try? await httpClient.data(for: request), (200..<300).contains(response.statusCode) {
-            planCache.store(PlanLabels.claude(fromProfile: response.data))
+            planCache.store(PlanLabels.claude(fromProfile: response.data), key: key)
         } else {
-            planCache.store(nil) // try again after the cache period, keep the last label meanwhile
+            planCache.store(nil, key: key) // try again after the cache period, keep the last label meanwhile
         }
-        return planCache.last
+        return planCache.last(key: key)
     }
 
     static func isExpired(_ expiresAt: Int?, now: Date) -> Bool {

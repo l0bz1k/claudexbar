@@ -3,6 +3,28 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.1] — 2026-11-04
+
+The rest of the code-review fixes.
+
+### Fixed
+- **AI Golden Hour after sleep.** If the Mac was asleep (or ClaudexBar not
+  running) when a window had to start for the golden time, the late start used
+  to be counted as on target. Now you get one notification — "won't reset at
+  14:00" or "missed the 14:00 reset" — and the window runs on the regular
+  schedule until the next golden hour. An anchor more than 10 minutes late is
+  never counted as hitting the target, and a window that happens to reset on
+  time anyway counts as met.
+- **Codex with `CODEX_HOME`.** The login is read from `$CODEX_HOME/auth.json`
+  (taken from the app's environment, else from your login shell), not always
+  `~/.codex`; re-login, auto-start and CLI updates run `codex` with the same
+  directory. If Codex keeps its login in the system keychain
+  (`cli_auth_credentials_store = "keyring"`/`"auto"`), the menu says so
+  instead of a bare "auth".
+- **Plans and reset dates follow the account.** After signing in to another
+  Claude or ChatGPT account, the plan label and Codex reset dates of the
+  previous account are no longer shown from the cache.
+
 ## [0.10.0] — 2026-11-04
 
 Fixes from a full code review (Codex, gpt-6-luna), plus one display change.
