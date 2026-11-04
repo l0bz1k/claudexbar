@@ -7,6 +7,9 @@ set -eu
 # It bumps the app version, commits "Release vX.Y.Z", tags it, pushes, and
 # creates the GitHub release (notes from the matching CHANGELOG.md section, or
 # auto-generated). Requires a clean working tree and the gh CLI.
+# Then it waits for the Release workflow to attach the build; if no GitHub
+# macOS runner picks it up within RELEASE_WAIT_MIN minutes (default 20), it
+# builds locally, attaches that and verifies the uploaded checksum.
 #
 # Tip: add the new version's section to CHANGELOG.md *before* running this.
 
@@ -73,3 +76,70 @@ else
 fi
 
 echo "Released ${TAG}"
+
+# ---------------------------------------------------------------------------
+# Build assets. The Release workflow builds and attaches them on a GitHub
+# macOS runner; those are sometimes scarce and a job can sit in the queue
+# for a long time. Wait up to RELEASE_WAIT_MIN minutes (default 20; 0 builds
+# locally right away), then build the same tagged commit here, attach it and
+# check the uploaded copy. The app isn't signed, so a local build is
+# equivalent to the CI one.
+WAIT_MIN="${RELEASE_WAIT_MIN:-20}"
+
+has_assets() {
+  gh release view "${TAG}" -R "${REPO}" --json assets -q '.assets[].name' 2>/dev/null \
+    | grep -qx 'ClaudexBar.zip.sha256'
+}
+
+release_run() { # id and status of the Release workflow run for this tag
+  gh run list -R "${REPO}" --workflow release.yml --branch "${TAG}" --limit 1 \
+    --json databaseId,status,conclusion -q '.[0] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null || true
+}
+
+deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
+while [ "$(date +%s)" -lt "${deadline}" ]; do
+  if has_assets; then
+    echo "Assets attached by the Release workflow."
+    exit 0
+  fi
+  set -- $(release_run)
+  if [ "${2:-}" = "completed" ] && [ "${3:-}" != "success" ]; then
+    echo "Release workflow finished with '${3:-?}' — building locally."
+    break
+  fi
+  printf 'Waiting for the Release workflow (%s)…\n' "${2:-not started}"
+  sleep 30
+done
+has_assets && { echo "Assets attached by the Release workflow."; exit 0; }
+
+# Stop a still-queued CI build so it can't replace the local assets later.
+set -- $(release_run)
+if [ -n "${1:-}" ] && [ "${2:-}" != "completed" ]; then
+  gh run cancel "$1" -R "${REPO}" >/dev/null 2>&1 || true
+  echo "Cancelled the waiting Release workflow run $1."
+fi
+
+echo "Building ${TAG} locally…"
+rm -rf dist
+VERSION="${VERSION}" sh scripts/build-app.sh dist
+( cd dist \
+  && ditto -c -k --keepParent ClaudexBar.app ClaudexBar.zip \
+  && shasum -a 256 ClaudexBar.zip > ClaudexBar.zip.sha256 )
+
+uploaded=""
+for attempt in 1 2 3 4 5; do
+  if gh release upload "${TAG}" -R "${REPO}" dist/ClaudexBar.zip dist/ClaudexBar.zip.sha256 --clobber; then
+    uploaded=1; break
+  fi
+  echo "Upload failed (attempt ${attempt}), retrying…"; sleep 10
+done
+[ -n "${uploaded}" ] || { echo "Could not upload the assets."; exit 1; }
+
+# Check what users will download, not just what was sent.
+CHECK="$(mktemp -d)"
+gh release download "${TAG}" -R "${REPO}" -D "${CHECK}" -p 'ClaudexBar.zip*' --clobber
+EXPECTED="$(awk '{print $1}' "${CHECK}/ClaudexBar.zip.sha256")"
+ACTUAL="$(shasum -a 256 "${CHECK}/ClaudexBar.zip" | awk '{print $1}')"
+rm -rf "${CHECK}"
+[ "${EXPECTED}" = "${ACTUAL}" ] || { echo "Uploaded assets don't match (${EXPECTED} vs ${ACTUAL})."; exit 1; }
+echo "Assets built locally and attached; checksum verified (${ACTUAL})."
