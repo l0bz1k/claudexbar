@@ -92,6 +92,9 @@ public struct OpenCodeFreeProvider: UsageProvider {
     /// How long an unconfirmed (log-only) block is assumed to last at most.
     /// Free-tier waits seen so far are 5-17 h.
     static let unconfirmedBlockLimit: TimeInterval = 24 * 60 * 60
+    /// How long a logged refusal still counts as "blocked now". Apps that keep
+    /// retrying (opencode v1 every ~10 min) keep refreshing it.
+    static let refusalEvidenceWindow: TimeInterval = 60 * 60
 
     public static func snapshot(refusalJSON: String?, loggedRefusalAt: Date? = nil, now: Date) -> UsageSnapshot {
         let resetAt = refusalJSON.flatMap { resetDate(fromRefusal: $0) }
@@ -100,6 +103,19 @@ public struct OpenCodeFreeProvider: UsageProvider {
            blockedAt <= now, now.timeIntervalSince(blockedAt) < unconfirmedBlockLimit {
             let clock = DateFormatter()
             clock.dateFormat = "HH:mm"
+            // A refusal is only evidence for a while: the server says nothing
+            // until something asks again, and the limit can lift hours before
+            // anyone does. Past that, say "unknown" rather than a stale 0%.
+            if now.timeIntervalSince(blockedAt) >= refusalEvidenceWindow {
+                let window = UsageWindow(
+                    windowLabel: "free",
+                    remainingPercent: 100,
+                    resetAt: nil,
+                    title: "Free tier: last refused at \(clock.string(from: blockedAt)), nothing tried since — the limit may have reset; the next request will tell",
+                    displayValue: "?"
+                )
+                return UsageSnapshot(primary: window, secondary: nil, fetchedAt: now)
+            }
             let window = UsageWindow(
                 windowLabel: "free",
                 remainingPercent: 0,

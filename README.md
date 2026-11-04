@@ -40,7 +40,7 @@ A small native macOS menu-bar app that shows how much of your AI coding limits i
 
 The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/share/opencode/auth.json`) or from `OPENROUTER_API_KEY` / `OPENCODE_API_KEY`, so if opencode works, ClaudexBar does too. A provider with nothing configured shows `no key`.
 
-**About OpenCode Free:** opencode's free models have no usage API — the server only says *"Free usage limit reached"* (HTTP 429 with `Retry-After`) when it refuses a request. opencode saves that response, so ClaudexBar reads the latest one and counts down to the reset. How much free usage is left before that point is never reported, so it shows `ok` rather than an invented percentage.
+**About OpenCode Free:** opencode's free models have no usage API — the server only says *"Free usage limit reached"* (HTTP 429 with `Retry-After`) when it refuses a request. opencode saves that response, so ClaudexBar reads the latest one and counts down to the reset. How much free usage is left before that point is never reported, so it shows `ok` rather than an invented percentage. A refusal older than an hour with nothing tried since shows `?`: the limit may have reset, and only the next request can tell.
 
 ## Features
 

@@ -3,6 +3,16 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.3] — 2026-11-04
+
+### Fixed
+- **OpenCode Free no longer shows a stale 0% for hours.** The free tier only
+  answers when something asks, so a refusal is evidence for a while, not
+  forever. A logged refusal now means 0% for an hour (apps that keep retrying
+  keep it fresh); after that, with nothing tried since, the row shows "?" —
+  "last refused at 03:48, nothing tried since; the limit may have reset" —
+  until the next request settles it.
+
 ## [0.8.2] — 2026-11-02
 
 ### Added

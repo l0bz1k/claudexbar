@@ -1209,6 +1209,9 @@ func testOpenCodeFreeLoggedBlockSnapshot() throws {
     let blockedAt = ISO8601DateFormatter().date(from: "2026-10-31T14:23:32Z")!
     let now = blockedAt.addingTimeInterval(60)
     let live = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: now)
+    let stale = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(2 * 3600))
+    try expect(stale.primary?.displayValue == "?", "a refusal hours old with nothing tried since is 'unknown', not a stale 0%")
+    try expect(stale.primary?.title?.contains("may have reset") == true, "tooltip says why")
     try expect(live.primary?.remainingPercent == 0 && live.primary?.resetAt == nil && live.primary?.displayValue == nil, "blocked while opencode waits to retry: 0%, no invented countdown")
     try expect(live.primary?.title?.contains("limit reached at") == true, "the tooltip explains the missing reset time")
 
@@ -1216,8 +1219,8 @@ func testOpenCodeFreeLoggedBlockSnapshot() throws {
     let exact = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, loggedRefusalAt: blockedAt, now: ISO8601DateFormatter().date(from: "2026-10-30T20:00:00Z")!)
     try expect(exact.primary?.resetAt != nil, "an exact reset from the database wins")
 
-    let stale = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(25 * 3600))
-    try expect(stale.primary?.displayValue == "ok", "an unconfirmed block expires after 24 h")
+    let expired = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(25 * 3600))
+    try expect(expired.primary?.displayValue == "ok", "an unconfirmed block expires after 24 h")
 }
 
 // MARK: - v0.8.0: banked rate-limit resets
