@@ -44,6 +44,7 @@ final class StatusBarController: NSObject {
     /// Last error written to the log per provider, so a persistent condition
     /// (e.g. a provider with no key configured) is logged once, not every poll.
     private var lastLoggedError: [ProviderID: String] = [:]
+    private var opencodeFreeProbeInFlight = false
     private var presentedMenu: NSMenu?
     private var cliUpdateSnapshot: CLIUpdateSnapshot?
     private var cliUpdateCheckInProgress = false
@@ -259,7 +260,8 @@ final class StatusBarController: NSObject {
                     if let plan = snapshot.plan, plan != snapshots[provider]?.plan {
                         logger.log(provider: provider, message: "plan: \(plan)")
                     }
-                    snapshots[provider] = snapshot
+                    snapshots[provider] = provider == .opencodeFree ? decorateWithNextCheck(snapshot) : snapshot
+                    if provider == .opencodeFree { maybeCheckOpencodeFree(snapshot: snapshot) }
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
                     errors[provider] = nil
@@ -655,6 +657,16 @@ final class StatusBarController: NSObject {
         menu.addItem(logs)
 
         menu.addItem(toggleItem(title: "Smart Auto Switch", isOn: settings.smartSwitchEnabled, action: #selector(toggleSmartSwitch)))
+        if isShownInMenu(.opencodeFree) {
+            let check = toggleItem(title: "Check OpenCode Free Hourly", isOn: settings.opencodeFreeProbeEnabled, action: #selector(toggleOpencodeFreeProbe))
+            if opencodeMajorVersion.map({ $0 >= 2 }) == true {
+                check.isEnabled = false
+                check.toolTip = "Not available for opencode 2.x yet."
+            } else {
+                check.toolTip = "While OpenCode Free isn't ready, ask one of its free models once an hour (through your opencode, in a separate clean profile) and show the answer."
+            }
+            menu.addItem(check)
+        }
         menu.addItem(autoStartMenu())
         menu.addItem(displayMenu())
         menu.addItem(toggleItem(title: "Launch at Login", isOn: LaunchAgentManager.isEnabled(), action: #selector(toggleLaunchAtLogin)))
@@ -716,6 +728,111 @@ final class StatusBarController: NSObject {
             line.indentationLevel = 1
             line.toolTip = resets.items.compactMap(\.title).first
             menu.addItem(line)
+        }
+    }
+
+    // MARK: OpenCode Free availability check
+
+    private var opencodeMajorVersion: Int? {
+        cliUpdateSnapshot?.installed[.opencodeFree].flatMap { $0.split(separator: ".").first.flatMap { Int($0) } }
+    }
+
+    private var opencodeFreeProvider: OpenCodeFreeProvider? {
+        providers[.opencodeFree] as? OpenCodeFreeProvider
+    }
+
+    @objc private func toggleOpencodeFreeProbe() {
+        settings.opencodeFreeProbeEnabled.toggle()
+        logger.log(provider: .opencodeFree, message: "free-tier check: \(settings.opencodeFreeProbeEnabled ? "on" : "off")")
+        refresh(provider: .opencodeFree)
+    }
+
+    private func nextOpencodeFreeCheck() -> Date {
+        OpencodeFreeProbe.nextCheck(
+            lastRefusal: opencodeFreeProvider?.latestRefusal(),
+            lastCheck: settings.opencodeFreeProbeLastAt,
+            inconclusiveStreak: settings.opencodeFreeProbeStreak
+        )
+    }
+
+    /// Shows when the next check runs ("chk 37m") instead of a bare "free".
+    private func decorateWithNextCheck(_ snapshot: UsageSnapshot) -> UsageSnapshot {
+        guard settings.opencodeFreeProbeEnabled, let window = snapshot.primary, window.displayValue != "ready" else { return snapshot }
+        let label: String
+        let note: String
+        if opencodeFreeProbeInFlight {
+            label = "chk…"
+            note = "checking now"
+        } else {
+            let wait = max(0, nextOpencodeFreeCheck().timeIntervalSinceNow)
+            let minutes = Int((wait / 60).rounded(.up))
+            label = minutes <= 0 ? "chk…" : "chk \(minutes)m"
+            note = minutes <= 0 ? "checking shortly" : "next check in \(minutes) min"
+        }
+        let decorated = UsageWindow(
+            windowLabel: label,
+            remainingPercent: window.remainingPercent,
+            resetAt: window.resetAt,
+            windowDuration: window.windowDuration,
+            title: (window.title ?? "Free tier") + " · \(note)",
+            displayValue: window.displayValue
+        )
+        return UsageSnapshot(primary: decorated, secondary: snapshot.secondary, fetchedAt: snapshot.fetchedAt,
+                             extraWindows: snapshot.extraWindows, resets: snapshot.resets, credit: snapshot.credit, plan: snapshot.plan)
+    }
+
+    private func maybeCheckOpencodeFree(snapshot: UsageSnapshot) {
+        guard settings.opencodeFreeProbeEnabled, !opencodeFreeProbeInFlight else { return }
+        if snapshot.primary?.displayValue == "ready" {
+            settings.opencodeFreeProbeStreak = 0
+            return
+        }
+        guard opencodeMajorVersion.map({ $0 < 2 }) ?? true,
+              Date() >= nextOpencodeFreeCheck(),
+              let executable = CLIExecutableLocator.executable(for: .opencodeFree) else { return }
+
+        opencodeFreeProbeInFlight = true
+        settings.opencodeFreeProbeLastAt = Date()
+        var cached = settings.opencodeFreeCatalog
+        if let at = cached?.at, Date().timeIntervalSince(at) > 24 * 3600 { cached = nil }
+        let unavailable = cached == nil ? [] : settings.opencodeFreeUnavailableModels
+
+        Task { [weak self] in
+            let catalog: [String]
+            if let models = cached?.models {
+                catalog = models
+            } else {
+                catalog = await OpencodeFreeProbeRunner.catalog(executable: executable)
+            }
+            let recent = OpencodeFreeProbe.recentModels(
+                logURL: OpenCodeFreeProvider.defaultLogURL,
+                databaseURL: OpenCodeFreeProvider.defaultDatabaseURL
+            )
+            let model = OpencodeFreeProbe.chooseModel(recent: recent, catalog: catalog, unavailable: unavailable)
+            let outcome: OpencodeFreeProbe.Outcome = if let model {
+                await OpencodeFreeProbeRunner.probe(executable: executable, model: model)
+            } else {
+                .inconclusive
+            }
+            await MainActor.run {
+                guard let self else { return }
+                if cached == nil, !catalog.isEmpty {
+                    self.settings.opencodeFreeCatalog = (catalog, Date())
+                    self.settings.opencodeFreeUnavailableModels = []
+                }
+                switch outcome {
+                case .ready, .blocked:
+                    self.settings.opencodeFreeProbeStreak = 0
+                case .modelMissing:
+                    if let model { self.settings.opencodeFreeUnavailableModels.insert(model) }
+                    self.settings.opencodeFreeProbeStreak += 1
+                case .inconclusive:
+                    self.settings.opencodeFreeProbeStreak += 1
+                }
+                self.logger.log(provider: .opencodeFree, message: "free-tier check with \(model ?? "no model"): \(outcome.rawValue)")
+                self.opencodeFreeProbeInFlight = false
+                self.refresh(provider: .opencodeFree)
+            }
         }
     }
 

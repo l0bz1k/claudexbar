@@ -63,7 +63,8 @@ public enum ProcessRunner {
         environment: [String: String]? = nil,
         workingDirectory: URL? = nil,
         timeout: TimeInterval,
-        outputLimit: Int = 16 * 1024
+        outputLimit: Int = 16 * 1024,
+        stopWhen: (@Sendable () -> Bool)? = nil
     ) async -> Result {
         await withCheckedContinuation { continuation in
             let process = Process()
@@ -107,6 +108,26 @@ public enum ProcessRunner {
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
                 state.finishLaunchFailure()
                 return
+            }
+
+            // Optional early stop, checked once a second: for commands that
+            // have said what they had to say but would otherwise keep waiting
+            // (opencode 1.x retries a refused request for hours).
+            if let stopWhen {
+                @Sendable func poll() {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                        guard process.isRunning else { return }
+                        if stopWhen() {
+                            process.terminate()
+                            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                            }
+                        } else {
+                            poll()
+                        }
+                    }
+                }
+                poll()
             }
 
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {

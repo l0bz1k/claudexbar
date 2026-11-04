@@ -1020,8 +1020,8 @@ func testOpenCodeFreeResetFromRealRefusal() throws {
     try expect(UsageFormatter.metricDisplay(for: during.primary, unavailableLabel: "free", now: ISO8601DateFormatter().date(from: "2026-10-30T20:21:00Z")!).label == "4h36m", "tray counts down to the reset")
 
     let after = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, now: ISO8601DateFormatter().date(from: "2026-10-31T01:00:00Z")!)
-    try expect(after.primary?.displayValue == "ok" && UsageFormatter.percentText(for: after.primary) == "ok", "after the reset: 'ok', not an invented percentage")
-    try expect(OpenCodeFreeProvider.snapshot(refusalJSON: nil, now: Date()).primary?.displayValue == "ok", "never refused: 'ok'")
+    try expect(after.primary?.displayValue == "ready" && UsageFormatter.percentText(for: after.primary) == "ready", "after the reset: 'ready', not an invented percentage")
+    try expect(OpenCodeFreeProvider.snapshot(refusalJSON: nil, now: Date()).primary?.displayValue == "ready", "never refused: 'ready'")
 
     let otherProvider = realFreeTierRefusal.replacingOccurrences(of: #""providerID":"opencode""#, with: #""providerID":"openrouter""#)
     try expect(OpenCodeFreeProvider.resetDate(fromRefusal: otherProvider) == nil, "another provider's 429 is not opencode's free tier")
@@ -1220,7 +1220,7 @@ func testOpenCodeFreeLoggedBlockSnapshot() throws {
     try expect(exact.primary?.resetAt != nil, "an exact reset from the database wins")
 
     let expired = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(25 * 3600))
-    try expect(expired.primary?.displayValue == "ok", "an unconfirmed block expires after 24 h")
+    try expect(expired.primary?.displayValue == "ready", "an unconfirmed block expires after 24 h")
 }
 
 // MARK: - v0.8.0: banked rate-limit resets
@@ -1382,6 +1382,92 @@ func testProvidersCarryPlanLabels() throws {
     try expect(first.plan == "Max 5x", "Claude plan from the profile: \(String(describing: first.plan))")
     _ = runBlocking { await claude.fetchUsage() }
     try expect(http.count("/api/oauth/profile") == 1, "profile is cached, not fetched every poll")
+}
+
+// MARK: - v0.9.0: OpenCode Free availability check
+
+private let realFreeCatalog = """
+opencode/beam-free
+opencode/claude-sonnet-5-5
+opencode/crouton-alpha-free
+opencode/deepseek-v4.1-flash-free
+opencode/flint-40b-free
+some warning line
+opencode/glm-5.3-flash-free
+"""
+
+func testProbeCatalogAndModelChoice() throws {
+    let catalog = OpencodeFreeProbe.freeModels(fromCatalog: realFreeCatalog)
+    try expect(catalog == ["beam-free", "crouton-alpha-free", "deepseek-v4.1-flash-free", "flint-40b-free", "glm-5.3-flash-free"], "only free models of the opencode provider: \(catalog)")
+    try expect(OpencodeFreeProbe.chooseModel(recent: ["flint-40b-free"], catalog: catalog, unavailable: []) == "flint-40b-free", "the user's own recent model first")
+    try expect(OpencodeFreeProbe.chooseModel(recent: ["gone-free", "deepseek-v4.1-flash-free"], catalog: catalog, unavailable: []) == "deepseek-v4.1-flash-free", "a model no longer in the catalog is skipped")
+    try expect(OpencodeFreeProbe.chooseModel(recent: ["flint-40b-free"], catalog: catalog, unavailable: ["flint-40b-free"]) == "beam-free", "a model the server said is gone is skipped for the catalog's first")
+    try expect(OpencodeFreeProbe.chooseModel(recent: [], catalog: catalog, unavailable: []) == "beam-free", "no history: any free model from the catalog")
+    try expect(OpencodeFreeProbe.chooseModel(recent: ["flint-40b-free"], catalog: [], unavailable: []) == "flint-40b-free", "no catalog available: the user's recent model")
+    try expect(OpencodeFreeProbe.chooseModel(recent: [], catalog: [], unavailable: []) == nil, "nothing to ask")
+}
+
+func testProbeOutcomeClassification() throws {
+    // The probe's own log line from 2026-11-04 (truncated by opencode).
+    let refused = #"timestamp=2026-11-04T07:11:26.410Z level=ERROR run=0bdb46fd message="stream error" providerID=opencode modelID=deepseek-v4.1-flash-free session.id=ses_x small=false agent=build mode=primary error.error="AI_APICallError: Free usage limi"#
+    try expect(OpencodeFreeProbe.logHasVerdict(refused), "a refusal in the log stops opencode's retries")
+    try expect(OpencodeFreeProbe.classify(newLog: refused, stdout: "", exitCode: 15) == .blocked, "refused -> blocked")
+    try expect(OpencodeFreeProbe.classify(newLog: "error ProviderModelNotFoundError: x", stdout: "", exitCode: 1) == .modelMissing, "model gone")
+    try expect(OpencodeFreeProbe.classify(newLog: "message=stream ...", stdout: "ready\n", exitCode: 0) == .ready, "answered -> ready")
+    try expect(OpencodeFreeProbe.classify(newLog: "", stdout: "", exitCode: 15) == .inconclusive, "timeout / network -> can't tell")
+}
+
+func testProbeSchedule() throws {
+    let t = Date(timeIntervalSince1970: 1_793_000_000)
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: t, lastCheck: nil, inconclusiveStreak: 0) == t.addingTimeInterval(3600), "an hour after the latest refusal")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: t, lastCheck: t.addingTimeInterval(600), inconclusiveStreak: 0) == t.addingTimeInterval(4200), "an hour after the latest of refusal/check")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t, inconclusiveStreak: 1) == t.addingTimeInterval(900), "couldn't tell: again in 15 min")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t, inconclusiveStreak: 3) == t.addingTimeInterval(3600), "backoff capped at an hour")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: nil, inconclusiveStreak: 0) < t, "never checked: due now")
+}
+
+func testProcessRunnerStopsOnCondition() throws {
+    let flag = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-stop-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: flag) }
+    DispatchQueue.global().asyncAfter(deadline: .now() + 1) { FileManager.default.createFile(atPath: flag.path, contents: Data()) }
+    let started = Date()
+    let path = flag.path
+    let result = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 60,
+                                stopWhen: { FileManager.default.fileExists(atPath: path) })
+    }
+    try expect(Date().timeIntervalSince(started) < 10, "stopped as soon as the condition held")
+    try expect(!result.timedOut, "stopping early is not a timeout")
+}
+
+func testProviderCountsProbeEvidence() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-probe-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let userLog = dir.appendingPathComponent("user.log"), probeLog = dir.appendingPathComponent("probe.log")
+    try Data().write(to: userLog)
+    let refusedAt = Date().addingTimeInterval(-120)
+    let stamp = ISO8601DateFormatter().string(from: refusedAt)
+    try Data("timestamp=\(stamp) level=ERROR message=\"stream error\" providerID=opencode modelID=x-free error.error=\"Free usage limit reached\"\n".utf8).write(to: probeLog)
+    let userDB = dir.appendingPathComponent("user.db"), probeDB = dir.appendingPathComponent("probe.db")
+    let schema = "CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);"
+    for db in [userDB, probeDB] {
+        _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, schema], timeout: 20) }
+    }
+    func provider() -> OpenCodeFreeProvider {
+        OpenCodeFreeProvider(databaseURL: userDB, logURL: userLog, extraLogURLs: [probeLog], extraDatabaseURLs: [probeDB])
+    }
+    let first = provider()
+    guard case .success(let blocked) = runBlocking({ await first.fetchUsage() }) else { throw TestFailure(description: "fetch") }
+    try expect(blocked.primary?.remainingPercent == 0 && blocked.primary?.displayValue == nil, "the check's refusal counts: 0%")
+
+    let ms = Int64(Date().timeIntervalSince1970 * 1000)
+    let answer = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"tokens":{"output":3}}"#.replacingOccurrences(of: "'", with: "''")
+    let insert = "INSERT INTO message VALUES ('a','s',\(ms),\(ms),'\(answer)');"
+    _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [probeDB.path, insert], timeout: 20) }
+    let second = provider()
+    guard case .success(let ready) = runBlocking({ await second.fetchUsage() }) else { throw TestFailure(description: "fetch 2") }
+    try expect(ready.primary?.displayValue == "ready", "the check's answer counts: ready")
 }
 
 func testResetLabelsUseAbsoluteResetDates() throws {
@@ -2033,6 +2119,11 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("probe catalog and model choice", testProbeCatalogAndModelChoice),
+    ("probe outcome classification", testProbeOutcomeClassification),
+    ("probe schedule", testProbeSchedule),
+    ("process runner stops on condition", testProcessRunnerStopsOnCondition),
+    ("provider counts probe evidence", testProviderCountsProbeEvidence),
     ("plan labels", testPlanLabels),
     ("providers carry plan labels", testProvidersCarryPlanLabels),
     ("Claude included credit from real response", testClaudeIncludedCreditFromRealResponse),

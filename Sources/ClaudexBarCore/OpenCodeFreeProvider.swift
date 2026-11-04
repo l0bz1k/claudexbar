@@ -8,7 +8,7 @@ import SQLite3
 /// that response — headers included — in its local session database, so this
 /// provider reads the most recent such refusal (read-only, no network) and
 /// shows a countdown until `Date` + `Retry-After`. Outside a block it shows
-/// "ok": how much free usage is left is never reported, and a made-up
+/// "ready": how much free usage is left is never reported, and a made-up
 /// percentage would be worse than none.
 public struct OpenCodeFreeProvider: UsageProvider {
     public let id = ProviderID.opencodeFree
@@ -16,6 +16,10 @@ public struct OpenCodeFreeProvider: UsageProvider {
 
     private let databaseURL: URL
     private let logURL: URL
+    /// The availability check's own profile (see `OpencodeFreeProbe`): its
+    /// refusals and answers count as evidence just like the user's own.
+    private let extraLogURLs: [URL]
+    private let extraDatabaseURLs: [URL]
     private let now: @Sendable () -> Date
 
     public static var defaultDatabaseURL: URL {
@@ -29,11 +33,20 @@ public struct OpenCodeFreeProvider: UsageProvider {
     public init(
         databaseURL: URL = OpenCodeFreeProvider.defaultDatabaseURL,
         logURL: URL = OpenCodeFreeProvider.defaultLogURL,
+        extraLogURLs: [URL] = [OpencodeFreeProbe.logURL],
+        extraDatabaseURLs: [URL] = [OpencodeFreeProbe.databaseURL],
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.databaseURL = databaseURL
         self.logURL = logURL
+        self.extraLogURLs = extraLogURLs
+        self.extraDatabaseURLs = extraDatabaseURLs
         self.now = now
+    }
+
+    /// The newest free-tier refusal in any of the logs this provider reads.
+    public func latestRefusal() -> Date? {
+        ([logURL] + extraLogURLs).compactMap { Self.latestLoggedRefusal(logURL: $0) }.max()
     }
 
     public func reauthCommand() -> ShellCommand {
@@ -50,8 +63,10 @@ public struct OpenCodeFreeProvider: UsageProvider {
         // While opencode is still waiting to retry, the refusal exists only in
         // its log (and in memory): nothing reaches the database until it gives
         // up. Check whether a free-model answer has succeeded since then.
-        let liveRefusal = Self.latestLoggedRefusal(logURL: logURL)
-        let succeeded = liveRefusal.map { Self.freeModelSucceeded(since: $0, databaseURL: databaseURL) } ?? false
+        let liveRefusal = latestRefusal()
+        let succeeded = liveRefusal.map { refusal in
+            ([databaseURL] + extraDatabaseURLs).contains { Self.freeModelSucceeded(since: refusal, databaseURL: $0) }
+        } ?? false
         return .success(Self.snapshot(
             refusalJSON: latest.isEmpty ? nil : latest,
             loggedRefusalAt: succeeded ? nil : liveRefusal,
@@ -138,7 +153,7 @@ public struct OpenCodeFreeProvider: UsageProvider {
             remainingPercent: 100,
             resetAt: nil,
             title: "Free tier: no limit hit (OpenCode doesn't report how much is left)",
-            displayValue: "ok"
+            displayValue: "ready"
         )
         return UsageSnapshot(primary: window, secondary: nil, fetchedAt: now)
     }

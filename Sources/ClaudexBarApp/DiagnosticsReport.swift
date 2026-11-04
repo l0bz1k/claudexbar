@@ -40,6 +40,7 @@ enum DiagnosticsReport {
         lines.append("refresh: \(Int(settings.refreshInterval))s; percent: \(settings.percentMode.rawValue); pace warning session/long: \(settings.paceWarningSession)/\(settings.paceWarningLong); smart switch: \(settings.smartSwitchEnabled)")
         lines.append("launch at login: \(LaunchAgentManager.isEnabled()); auto CLI updates: \(settings.automaticCLIUpdatesEnabled) \(settings.cliUpdateProviders.map(\.rawValue))")
         lines.append("golden hour: \(settings.goldenHourEnabled ? "on" : "off") at \(settings.goldenHour?.label ?? "—")")
+        lines.append("opencode free check: \(settings.opencodeFreeProbeEnabled ? "on" : "off"), last \(settings.opencodeFreeProbeLastAt.map { ISO8601DateFormatter().string(from: $0) } ?? "never"), streak \(settings.opencodeFreeProbeStreak), catalog \(settings.opencodeFreeCatalog?.models.count ?? 0), unavailable \(settings.opencodeFreeUnavailableModels.sorted())")
 
         for provider in ProviderID.displayOrder where settings.enabledProviders.contains(provider) || provider.isCodingCLI {
             lines.append("")

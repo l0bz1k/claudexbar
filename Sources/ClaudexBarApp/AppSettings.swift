@@ -184,6 +184,43 @@ final class AppSettings {
         defaults.set(date, forKey: "goldenMissNotifiedFor.\(provider.rawValue)")
     }
 
+    // MARK: OpenCode Free availability check
+
+    var opencodeFreeProbeEnabled: Bool {
+        get { defaults.bool(forKey: "opencodeFreeProbeEnabled") }
+        set { defaults.set(newValue, forKey: "opencodeFreeProbeEnabled") }
+    }
+
+    var opencodeFreeProbeLastAt: Date? {
+        get { defaults.object(forKey: "opencodeFreeProbeLastAt") as? Date }
+        set { defaults.set(newValue, forKey: "opencodeFreeProbeLastAt") }
+    }
+
+    /// Consecutive checks that couldn't tell (network, timeout): the next one
+    /// comes sooner.
+    var opencodeFreeProbeStreak: Int {
+        get { defaults.integer(forKey: "opencodeFreeProbeStreak") }
+        set { defaults.set(newValue, forKey: "opencodeFreeProbeStreak") }
+    }
+
+    /// The free-model catalog from the last `opencode models opencode`, and
+    /// models the server said no longer exist — both renewed daily.
+    var opencodeFreeCatalog: (models: [String], at: Date)? {
+        get {
+            guard let at = defaults.object(forKey: "opencodeFreeCatalogAt") as? Date else { return nil }
+            return (defaults.stringArray(forKey: "opencodeFreeCatalog") ?? [], at)
+        }
+        set {
+            defaults.set(newValue?.models, forKey: "opencodeFreeCatalog")
+            defaults.set(newValue?.at, forKey: "opencodeFreeCatalogAt")
+        }
+    }
+
+    var opencodeFreeUnavailableModels: Set<String> {
+        get { Set(defaults.stringArray(forKey: "opencodeFreeUnavailableModels") ?? []) }
+        set { defaults.set(Array(newValue).sorted(), forKey: "opencodeFreeUnavailableModels") }
+    }
+
     // MARK: Banked resets
 
     /// Resets a "new reset available" notification was already sent for, and

@@ -3,6 +3,33 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-11-04
+
+### Added
+- **Check OpenCode Free Hourly** (off by default). The free tier only says
+  whether it works when asked, so a block could show for hours after it
+  lifted. With this on, while OpenCode Free isn't ready, ClaudexBar asks one of
+  its free models once an hour — an hour after the latest refusal or check;
+  sooner (15 → 30 → 60 min) after a check that couldn't tell — and the tray
+  counts down to the next check ("chk 37m").
+  - Uses the installed `opencode` itself, so the request is exactly what your
+    opencode sends and takes the same route through any proxy; only the
+    `opencode` provider's free models are asked, by explicit model name.
+  - Runs in ClaudexBar's own clean opencode profile: none of your plugins (a
+    fallback plugin could fake a "ready"), MCP servers or keys, and nothing in
+    your history. No custom agent: the free tier refuses clients with basic
+    tools disabled, and it keeps the check compatible across versions.
+  - Free models change, so the model is picked each time: the one you last
+    used, else your most used this week, else any free model in the catalog
+    the installed opencode reports — always confirmed against that catalog; a
+    model the server says is gone is skipped until the catalog is renewed.
+  - Stops opencode as soon as the server answers (opencode 1.x would retry a
+    refusal for hours). Not yet available for opencode 2.x.
+
+### Changed
+- OpenCode Free shows **"ready"** instead of "ok", which read too much like
+  "0%" at a glance.
+
 ## [0.8.3] — 2026-11-04
 
 ### Fixed
