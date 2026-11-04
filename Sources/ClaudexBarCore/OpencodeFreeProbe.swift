@@ -27,10 +27,15 @@ public enum OpencodeFreeProbe {
     public static var dataDirectory: URL { directory.appendingPathComponent("data") }
     public static var logURL: URL { dataDirectory.appendingPathComponent("opencode/log/opencode.log") }
     public static var databaseURL: URL { dataDirectory.appendingPathComponent("opencode/opencode.db") }
+    /// The free models of the last catalog read, one id per line.
+    public static var catalogURL: URL { directory.appendingPathComponent("free-models.txt") }
 
-    /// The environment that makes `opencode` use the clean profile.
+    /// The environment that makes `opencode` use the clean profile. Variables
+    /// that point opencode at other config, data or credentials (OPENCODE_*)
+    /// are dropped, so nothing of the user's setup leaks in; proxy and
+    /// certificate settings stay, so the check takes the user's own route.
     public static func environment(base: [String: String]) -> [String: String] {
-        base.merging([
+        base.filter { !$0.key.hasPrefix("OPENCODE_") }.merging([
             "XDG_CONFIG_HOME": directory.appendingPathComponent("config").path,
             "XDG_DATA_HOME": dataDirectory.path,
             "XDG_CACHE_HOME": directory.appendingPathComponent("cache").path,
@@ -51,38 +56,74 @@ public enum OpencodeFreeProbe {
 
     public static let prompt = "Reply with exactly: ready"
 
-    /// `opencode models opencode` output → the free models ("…-free").
-    public static func freeModels(fromCatalog output: String) -> [String] {
-        output.split(whereSeparator: \.isNewline).compactMap { line in
-            let text = line.trimmingCharacters(in: .whitespaces)
-            guard text.hasPrefix("opencode/") else { return nil }
-            let model = String(text.dropFirst("opencode/".count))
-            return model.hasSuffix("-free") && !model.contains(" ") ? model : nil
-        }
+    /// Fallback test for "free" while there is no catalog yet. Free models
+    /// are defined by price, not name (`big-pickle` is free), so this is only
+    /// a stopgap.
+    public static func looksFree(_ model: String) -> Bool {
+        model.hasSuffix("-free")
     }
 
-    /// Free models the user actually uses, most relevant first: the model of
-    /// their latest free-tier request in the log, then the most used one in
-    /// the last week.
-    public static func recentModels(logURL: URL, databaseURL: URL, now: Date = Date()) -> [String] {
+    /// `opencode models opencode --verbose` output (each `opencode/<id>` line
+    /// followed by the model's JSON) → the models that cost nothing and aren't
+    /// deprecated. Plain output (no JSON) falls back to the `-free` suffix.
+    public static func freeModels(fromCatalog output: String) -> [String] {
+        let lines = output.components(separatedBy: "\n")
         var models: [String] = []
-        if let tail = tail(of: logURL) {
-            for line in tail.split(separator: "\n").reversed() where line.contains("providerID=opencode ") {
-                if let range = line.range(of: "modelID="),
-                   case let model = String(line[range.upperBound...].prefix { $0 != " " }),
-                   model.hasSuffix("-free") {
-                    models.append(model)
-                    break
+        var index = 0
+        var sawJSON = false
+        while index < lines.count {
+            let text = lines[index].trimmingCharacters(in: .whitespaces)
+            index += 1
+            guard text.hasPrefix("opencode/"), !text.contains(" ") else { continue }
+            let model = String(text.dropFirst("opencode/".count))
+            // Collect the JSON block that follows, if any.
+            var block: [String] = []
+            if index < lines.count, lines[index].trimmingCharacters(in: .whitespaces) == "{" {
+                var depth = 0
+                while index < lines.count {
+                    let line = lines[index]
+                    block.append(line)
+                    depth += line.filter { $0 == "{" }.count - line.filter { $0 == "}" }.count
+                    index += 1
+                    if depth <= 0 { break }
                 }
             }
+            if !block.isEmpty,
+               let json = try? JSONSerialization.jsonObject(with: Data(block.joined(separator: "\n").utf8)) as? [String: Any] {
+                sawJSON = true
+                let cost = json["cost"] as? [String: Any]
+                let input = (cost?["input"] as? NSNumber)?.doubleValue
+                let outputCost = (cost?["output"] as? NSNumber)?.doubleValue
+                let deprecated = (json["status"] as? String)?.lowercased() == "deprecated"
+                if input == 0, outputCost == 0, !deprecated { models.append(model) }
+            } else if !sawJSON, looksFree(model) {
+                models.append(model)
+            }
         }
-        models.append(contentsOf: mostUsed(databaseURL: databaseURL, since: now.addingTimeInterval(-7 * 24 * 3600)))
         var seen = Set<String>()
         return models.filter { seen.insert($0).inserted }
     }
 
-    /// The model to ask. With a catalog, only models it still lists; without
-    /// one (catalog unavailable), the user's own recent model.
+    public static func saveCatalog(_ models: [String], to url: URL = catalogURL) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? (models.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// nil: no catalog has been read yet.
+    public static func loadCatalog(from url: URL = catalogURL) -> [String]? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let models = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+        return models.isEmpty ? nil : models
+    }
+
+    public static func catalogAge(of url: URL = catalogURL, now: Date = Date()) -> TimeInterval? {
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
+        return now.timeIntervalSince(modified)
+    }
+
+    /// The model to ask: the first preferred one (the user's current model
+    /// first) that the catalog still lists; else any free model in it. Without
+    /// a catalog, the first preferred one.
     public static func chooseModel(recent: [String], catalog: [String], unavailable: Set<String>) -> String? {
         let usable = { (model: String) in !unavailable.contains(model) }
         guard !catalog.isEmpty else { return recent.first(where: usable) }
@@ -143,7 +184,9 @@ public enum OpencodeFreeProbe {
         ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.uint64Value ?? 0
     }
 
-    private static func mostUsed(databaseURL: URL, since: Date) -> [String] {
+    /// The user's `opencode`-provider models by use since `since`, most used
+    /// first (paid ones included; callers filter to free models).
+    public static func mostUsed(databaseURL: URL, since: Date) -> [String] {
         var db: OpaquePointer?
         guard sqlite3_open_v2("file:\(databaseURL.path)?mode=ro", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
             sqlite3_close(db)
@@ -154,8 +197,8 @@ public enum OpencodeFreeProbe {
         let sql = """
         SELECT json_extract(data, '$.modelID') AS model, COUNT(*) AS n FROM message
         WHERE time_created > ? AND json_extract(data, '$.providerID') = 'opencode'
-          AND json_extract(data, '$.role') = 'assistant' AND model LIKE '%-free'
-        GROUP BY model ORDER BY n DESC LIMIT 5
+          AND json_extract(data, '$.role') = 'assistant'
+        GROUP BY model ORDER BY n DESC LIMIT 20
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }

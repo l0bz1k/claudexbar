@@ -40,21 +40,32 @@ public enum ProcessRunner {
     /// PATH for CLI subprocesses: the usual install locations first (launchd
     /// hands LaunchAgents a minimal PATH), then whatever we inherited.
     public static var cliEnvironment: [String: String] {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let preferred = [
-            "\(home)/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin"
-        ]
-        let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":").map(String.init)
-        var seen = Set<String>()
-        let path = (preferred + inherited).filter { seen.insert($0).inserted }.joined(separator: ":")
+        // The same directories the CLIs are found in, so a CLI installed with
+        // e.g. nvm also finds its `node`.
+        let path = ExecutableResolver.searchDirectories().joined(separator: ":")
         return ProcessInfo.processInfo.environment.merging(["PATH": path]) { _, new in new }
+    }
+
+    /// SIGTERM to the process and everything it started (a CLI's workers
+    /// would otherwise outlive it), SIGKILL to whatever is left 3 s later.
+    static func terminateTree(_ process: Process) {
+        let root = process.processIdentifier
+        let tree = descendants(of: root) + [root]
+        tree.forEach { kill($0, SIGTERM) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            tree.forEach { pid in if kill(pid, 0) == 0 { kill(pid, SIGKILL) } }
+        }
+    }
+
+    /// All descendants of `pid`, deepest first.
+    public static func descendants(of pid: pid_t) -> [pid_t] {
+        var result: [pid_t] = []
+        var buffer = [pid_t](repeating: 0, count: 256)
+        let count = Int(proc_listchildpids(pid, &buffer, Int32(buffer.count * MemoryLayout<pid_t>.size)))
+        for child in buffer.prefix(max(0, count)) where child > 0 {
+            result += descendants(of: child) + [child]
+        }
+        return result
     }
 
     public static func run(
@@ -118,10 +129,7 @@ public enum ProcessRunner {
                     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
                         guard process.isRunning else { return }
                         if stopWhen() {
-                            process.terminate()
-                            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                            }
+                            terminateTree(process)
                         } else {
                             poll()
                         }
@@ -133,12 +141,7 @@ public enum ProcessRunner {
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                 guard process.isRunning else { return }
                 state.markTimedOut()
-                process.terminate()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                    if process.isRunning {
-                        kill(process.processIdentifier, SIGKILL)
-                    }
-                }
+                terminateTree(process)
             }
         }
     }

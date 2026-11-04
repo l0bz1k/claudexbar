@@ -20,7 +20,10 @@ final class StatusBarController: NSObject {
         .opencodeFree: OpenCodeFreeProvider()
     ]
 
-    private var snapshots: [ProviderID: UsageSnapshot] = [:]
+    // Last known data, restored from the previous run; "fresh" are the
+    // providers that have answered since launch.
+    private var snapshots: [ProviderID: UsageSnapshot] = SnapshotStore.load()
+    private var freshProviders: Set<ProviderID> = []
     private var errors: [ProviderID: UsageError] = [:]
     private var statusOverrides: [ProviderID: String] = [:]
     private var codexReauthProcess: Process?
@@ -81,6 +84,8 @@ final class StatusBarController: NSObject {
     }
 
     func start() {
+        AppUpdater.scheduleBackupCleanup()
+        ExecutableResolver.warmUp()
         AppPaths.ensureDirectories()
         AppPaths.housekeeping()
         settings.removeLegacyCodexAccountSettings()
@@ -261,6 +266,8 @@ final class StatusBarController: NSObject {
                         logger.log(provider: provider, message: "plan: \(plan)")
                     }
                     snapshots[provider] = provider == .opencodeFree ? decorateWithNextCheck(snapshot) : snapshot
+                    freshProviders.insert(provider)
+                    SnapshotStore.save(snapshots)
                     if provider == .opencodeFree { maybeCheckOpencodeFree(snapshot: snapshot) }
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
@@ -479,6 +486,7 @@ final class StatusBarController: NSObject {
     private func updateImage() {
         guard let button = statusItem.button else { return }
         button.toolTip = nil
+        button.appearsDisabled = false
         guard !providerSelection.enabledProviders.isEmpty else {
             button.image = StatusPillRenderer.pausedImage()
             return
@@ -493,9 +501,13 @@ final class StatusBarController: NSObject {
         // Keep showing the last good usage on transient errors (rate limit /
         // network blip); only fall back to a status word when there is no
         // snapshot yet, or the error needs the user's attention (auth, parse).
+        // Shown dimmed while it isn't confirmed: the service can't be reached
+        // right now (network, rate limit, server hiccup), or nothing has
+        // answered since launch yet. Full opacity returns with fresh data.
         let error = errors[activeProvider]
         if let snapshot = snapshots[activeProvider], error == nil || error!.isTransient {
             let now = Date()
+            let stale = error != nil || !freshProviders.contains(activeProvider)
             button.image = StatusPillRenderer.image(
                 provider: activeProvider,
                 snapshot: snapshot,
@@ -504,7 +516,15 @@ final class StatusBarController: NSObject {
                 sessionPaceWarning: settings.paceWarningSession,
                 longPaceWarning: settings.paceWarningLong
             )
-            button.toolTip = tooltip(for: activeProvider, snapshot: snapshot, now: now)
+            button.appearsDisabled = stale
+            var tip = tooltip(for: activeProvider, snapshot: snapshot, now: now)
+            if stale {
+                let clock = DateFormatter()
+                clock.dateFormat = "d MMM HH:mm"
+                let why = error.map { $0.sanitizedDescription } ?? "waiting for the first answer since launch"
+                tip = "Last known data, as of \(clock.string(from: snapshot.fetchedAt)) — \(why)\n" + tip
+            }
+            button.toolTip = tip
             return
         }
 
@@ -523,6 +543,11 @@ final class StatusBarController: NSObject {
         for (fallbackName, window) in windows {
             guard let window else { continue }
             let name = window.title ?? "\(fallbackName) (\(window.windowLabel))"
+            // An availability state is described by its title, not as "% left".
+            if !window.isQuantitative {
+                lines.append(window.availabilityOnly && window.displayValue == nil ? name : "\(name) — \(window.displayValue ?? "")")
+                continue
+            }
             let percent = settings.percentMode == .used ? window.usedPercent : window.remainingPercent
             let reset = window.resetAt.map { " · resets in \(UsageFormatter.resetLabel(resetAt: $0, now: now))" } ?? ""
             lines.append("\(name): \(percent)% \(side)\(reset)")
@@ -749,7 +774,7 @@ final class StatusBarController: NSObject {
 
     private func nextOpencodeFreeCheck() -> Date {
         OpencodeFreeProbe.nextCheck(
-            lastRefusal: opencodeFreeProvider?.latestRefusal(),
+            lastRefusal: opencodeFreeProvider?.currentModelRefusal().refusal,
             lastCheck: settings.opencodeFreeProbeLastAt,
             inconclusiveStreak: settings.opencodeFreeProbeStreak
         )
@@ -775,7 +800,8 @@ final class StatusBarController: NSObject {
             resetAt: window.resetAt,
             windowDuration: window.windowDuration,
             title: (window.title ?? "Free tier") + " · \(note)",
-            displayValue: window.displayValue
+            displayValue: window.displayValue,
+            availabilityOnly: window.availabilityOnly
         )
         return UsageSnapshot(primary: decorated, secondary: snapshot.secondary, fetchedAt: snapshot.fetchedAt,
                              extraWindows: snapshot.extraWindows, resets: snapshot.resets, credit: snapshot.credit, plan: snapshot.plan)
@@ -793,22 +819,22 @@ final class StatusBarController: NSObject {
 
         opencodeFreeProbeInFlight = true
         settings.opencodeFreeProbeLastAt = Date()
-        var cached = settings.opencodeFreeCatalog
-        if let at = cached?.at, Date().timeIntervalSince(at) > 24 * 3600 { cached = nil }
+        // The catalog is re-read daily; models the server said were gone get
+        // another chance with each fresh catalog.
+        let cached = (OpencodeFreeProbe.catalogAge().map { $0 < 24 * 3600 } ?? false) ? OpencodeFreeProbe.loadCatalog() : nil
         let unavailable = cached == nil ? [] : settings.opencodeFreeUnavailableModels
+        // The user's current model first, then their other recent ones.
+        let preferred = [opencodeFreeProvider?.currentModelRefusal().model].compactMap { $0 }
+            + OpencodeFreeProbe.mostUsed(databaseURL: OpenCodeFreeProvider.defaultDatabaseURL, since: Date().addingTimeInterval(-7 * 24 * 3600))
 
         Task { [weak self] in
             let catalog: [String]
-            if let models = cached?.models {
+            if let models = cached {
                 catalog = models
             } else {
                 catalog = await OpencodeFreeProbeRunner.catalog(executable: executable)
             }
-            let recent = OpencodeFreeProbe.recentModels(
-                logURL: OpenCodeFreeProvider.defaultLogURL,
-                databaseURL: OpenCodeFreeProvider.defaultDatabaseURL
-            )
-            let model = OpencodeFreeProbe.chooseModel(recent: recent, catalog: catalog, unavailable: unavailable)
+            let model = OpencodeFreeProbe.chooseModel(recent: preferred, catalog: catalog, unavailable: unavailable)
             let outcome: OpencodeFreeProbe.Outcome = if let model {
                 await OpencodeFreeProbeRunner.probe(executable: executable, model: model)
             } else {
@@ -817,7 +843,6 @@ final class StatusBarController: NSObject {
             await MainActor.run {
                 guard let self else { return }
                 if cached == nil, !catalog.isEmpty {
-                    self.settings.opencodeFreeCatalog = (catalog, Date())
                     self.settings.opencodeFreeUnavailableModels = []
                 }
                 switch outcome {
@@ -856,9 +881,9 @@ final class StatusBarController: NSObject {
         if let override = statusOverrides[provider] {
             return .status(override)
         }
-        // Like the tray: a transient error (rate limit, network blip) keeps
-        // the last known figures instead of flashing a status word.
-        if let snapshot = snapshots[provider], errors[provider] == nil || errors[provider]!.isTransient {
+        // The menu tells it straight: an error shows its status word ("net");
+        // the tray keeps showing the last numbers, dimmed.
+        if let snapshot = snapshots[provider], errors[provider] == nil {
             let first = UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)
             if snapshot.secondary == nil, provider == .opencodeFree {
                 return .figure(first) // a single window: no second column
@@ -1236,15 +1261,7 @@ final class StatusBarController: NSObject {
     }
 
     private func codexExecutableURL() -> URL? {
-        let candidates = [
-            "/Applications/Codex.app/Contents/Resources/codex",
-            "/Users/ipang/.local/bin/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
-        ]
-        return candidates
-            .map { URL(fileURLWithPath: $0) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        CLIExecutableLocator.executable(for: .codex)
     }
 
     private func reauthClaude() {

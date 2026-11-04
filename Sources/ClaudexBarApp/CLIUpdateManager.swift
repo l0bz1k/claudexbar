@@ -36,9 +36,8 @@ enum CLIExecutableLocator {
                 "/Applications/Codex.app/Contents/Resources/codex"
             ]
         }
-        return candidates
-            .map { URL(fileURLWithPath: $0) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        let name = provider == .opencodeFree ? "opencode" : provider.rawValue
+        return ExecutableResolver.find(name, extra: candidates)
     }
 }
 

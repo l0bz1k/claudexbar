@@ -103,9 +103,14 @@ enum AppUpdater {
             timeout: 30
         )
 
-        // 3. Swap bundles, keeping the old one until the new one is in place.
-        let backup = work.appendingPathComponent("ClaudexBar-previous.app", isDirectory: true)
+        // 3. Swap bundles. The previous app goes to a durable place outside
+        //    the work folder (which is deleted on return), and stays there
+        //    until the new version has been running for a minute.
+        let backupDirectory = backupDirectoryURL
+        let backup = backupDirectory.appendingPathComponent("ClaudexBar.app", isDirectory: true)
+        try? fileManager.removeItem(at: backupDirectory)
         do {
+            try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
             try fileManager.moveItem(at: installed, to: backup)
         } catch {
             return .swap("moving the current app aside: \(error.localizedDescription)")
@@ -113,13 +118,15 @@ enum AppUpdater {
         do {
             try fileManager.moveItem(at: newApp, to: installed)
         } catch {
-            try? fileManager.moveItem(at: backup, to: installed)
+            if (try? fileManager.moveItem(at: backup, to: installed)) == nil {
+                return .swap("putting the new app in place failed and so did restoring the old one — it is kept at \(backup.path)")
+            }
+            try? fileManager.removeItem(at: backupDirectory)
             return .swap("putting the new app in place: \(error.localizedDescription)")
         }
         logger.log(provider: .claude, message: "update: installed \(update.latest) (was \(update.current)), relaunching")
         logger.flush()
-        // `defer` won't run: this process terminates below. Clean up now —
-        // the previous version is no longer needed once the new one is in.
+        // `defer` won't run if this process terminates below; clean up now.
         try? fileManager.removeItem(at: work)
 
         // 4. Relaunch. The short pause lets macOS register the freshly
@@ -128,9 +135,37 @@ enum AppUpdater {
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
-        _ = try? await NSWorkspace.shared.openApplication(at: installed, configuration: configuration)
+        do {
+            _ = try await NSWorkspace.shared.openApplication(at: installed, configuration: configuration)
+        } catch {
+            // The new version wouldn't start: put the previous one back and
+            // keep running it.
+            logger.log(provider: .claude, message: "update: \(update.latest) wouldn't launch (\(error.localizedDescription)); restoring \(update.current)")
+            let failed = backupDirectory.appendingPathComponent("ClaudexBar-\(update.latest)-failed.app", isDirectory: true)
+            if (try? fileManager.moveItem(at: installed, to: failed)) != nil,
+               (try? fileManager.moveItem(at: backup, to: installed)) != nil {
+                try? fileManager.removeItem(at: failed)
+                return .swap("the new version wouldn't launch; the previous one was restored")
+            }
+            return .swap("the new version wouldn't launch; the previous one is kept at \(backup.path)")
+        }
         NSApp.terminate(nil)
         return nil
+    }
+
+    /// Where the previous version waits until the new one has proven it runs.
+    static var backupDirectoryURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClaudexBar/Previous", isDirectory: true)
+    }
+
+    /// Called at launch: once this version has been up for a minute, the copy
+    /// of the version it replaced is no longer needed. If this version crashes
+    /// at launch instead, the copy stays for a manual restore.
+    static func scheduleBackupCleanup() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+            try? FileManager.default.removeItem(at: backupDirectoryURL)
+        }
     }
 
     enum DownloadError: Error, CustomStringConvertible {

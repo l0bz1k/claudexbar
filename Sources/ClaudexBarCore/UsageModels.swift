@@ -112,14 +112,22 @@ public struct UsageWindow: Equatable, Sendable {
     /// Shown instead of a percentage when there is no honest number to show
     /// (e.g. "ok" for a free tier that never reports how much is left).
     public let displayValue: String?
+    /// A yes/no availability state (OpenCode Free), not a share of a quota:
+    /// its "0%" means "refused", its "ready" isn't "100% left". Kept out of
+    /// percentage notifications, usage-delta switching and "% left" text.
+    public let availabilityOnly: Bool
 
-    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil, title: String? = nil, displayValue: String? = nil) {
+    /// Whether `remainingPercent` is a real measured share of a quota.
+    public var isQuantitative: Bool { !availabilityOnly && displayValue == nil }
+
+    public init(windowLabel: String, remainingPercent: Int, resetAt: Date?, windowDuration: TimeInterval? = nil, title: String? = nil, displayValue: String? = nil, availabilityOnly: Bool = false) {
         self.windowLabel = windowLabel
         self.remainingPercent = max(0, min(100, remainingPercent))
         self.resetAt = resetAt
         self.windowDuration = windowDuration
         self.title = title
         self.displayValue = displayValue
+        self.availabilityOnly = availabilityOnly
     }
 
     public var usedPercent: Int { 100 - remainingPercent }

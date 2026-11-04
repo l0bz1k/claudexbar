@@ -1011,45 +1011,6 @@ private let realFreeTierRefusal = #"""
   "statusCode":429,"isRetryable":true,"responseHeaders":{"date":"Fri, 30 Oct 2026 13:15:37 GMT","retry-after":"42127"}}}}
 """#
 
-func testOpenCodeFreeResetFromRealRefusal() throws {
-    let reset = try expectNonNil(OpenCodeFreeProvider.resetDate(fromRefusal: realFreeTierRefusal), "reset computed")
-    try expect(reset == ISO8601DateFormatter().date(from: "2026-10-31T00:57:44Z"), "Date header + Retry-After: \(reset)")
-
-    let during = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, now: ISO8601DateFormatter().date(from: "2026-10-30T20:21:00Z")!)
-    try expect(during.primary?.remainingPercent == 0 && during.primary?.resetAt == reset, "blocked: 0% with a countdown")
-    try expect(UsageFormatter.metricDisplay(for: during.primary, unavailableLabel: "free", now: ISO8601DateFormatter().date(from: "2026-10-30T20:21:00Z")!).label == "4h36m", "tray counts down to the reset")
-
-    let after = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, now: ISO8601DateFormatter().date(from: "2026-10-31T01:00:00Z")!)
-    try expect(after.primary?.displayValue == "ready" && UsageFormatter.percentText(for: after.primary) == "ready", "after the reset: 'ready', not an invented percentage")
-    try expect(OpenCodeFreeProvider.snapshot(refusalJSON: nil, now: Date()).primary?.displayValue == "ready", "never refused: 'ready'")
-
-    let otherProvider = realFreeTierRefusal.replacingOccurrences(of: #""providerID":"opencode""#, with: #""providerID":"openrouter""#)
-    try expect(OpenCodeFreeProvider.resetDate(fromRefusal: otherProvider) == nil, "another provider's 429 is not opencode's free tier")
-}
-
-func testOpenCodeFreeReadsNewestRefusalFromDatabase() throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-ocdb-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: dir) }
-    let db = dir.appendingPathComponent("opencode.db")
-    func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
-    let older = realFreeTierRefusal.replacingOccurrences(of: "42127", with: "60")
-    let userText = #"{"role":"user","text":"why do I get Free usage exceeded?"}"#
-    let sql = """
-    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
-    INSERT INTO message VALUES ('a','s',1,1,\(q(older)));
-    INSERT INTO message VALUES ('b','s',2,2,\(q(realFreeTierRefusal)));
-    INSERT INTO message VALUES ('c','s',3,3,\(q(userText)));
-    """
-    let created = runBlocking {
-        await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, sql], timeout: 20)
-    }
-    try expect(created.succeeded, "test database created: \(created.stderr)")
-    let newest = try expectNonNil(OpenCodeFreeProvider.latestRefusal(databaseURL: db), "database readable")
-    try expect(newest.contains("42127"), "the newest stored refusal is used, user text mentioning the error is ignored")
-    try expect(OpenCodeFreeProvider.latestRefusal(databaseURL: dir.appendingPathComponent("missing.db")) == nil, "missing database -> unreadable")
-}
-
 func testOpencodeCLIVersionAndCapabilities() throws {
     try expect(ProviderID.opencodeFree.hasCLI && !ProviderID.opencodeFree.isCodingCLI, "opencode shows a version but gets no auto-start/auto-update")
     try expect(!ProviderID.openrouter.hasCLI && !ProviderID.opencodeFree.enabledByDefault, "API rows carry no CLI; OpenCode Free is opt-in")
@@ -1166,62 +1127,6 @@ timestamp=2026-10-31T14:23:38.965Z level=ERROR run=835078d2 message="stream erro
 timestamp=2026-10-31T14:30:00.000Z level=ERROR run=1 message="stream error" providerID=openrouter modelID=x error.error="Free usage limit reached elsewhere"
 timestamp=2026-10-31T14:31:00.000Z level=INFO run=1 message="unrelated"
 """
-
-func testOpenCodeFreeReadsLatestLoggedRefusal() throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-oclog-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: dir) }
-    let log = dir.appendingPathComponent("opencode.log")
-    try Data(realOpencodeLogTail.utf8).write(to: log)
-    let at = try expectNonNil(OpenCodeFreeProvider.latestLoggedRefusal(logURL: log), "refusal found in the log")
-    try expect(abs(at.timeIntervalSince(ISO8601DateFormatter().date(from: "2026-10-31T14:23:38Z")!) - 0.965) < 0.01,
-               "newest opencode-provider refusal; other providers' errors and later lines ignored: \(at)")
-    try expect(OpenCodeFreeProvider.latestLoggedRefusal(logURL: dir.appendingPathComponent("none.log")) == nil, "no log -> nil")
-}
-
-func testOpenCodeFreeDetectsSuccessAfterRefusal() throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claudexbar-ocok-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: dir) }
-    let db = dir.appendingPathComponent("opencode.db")
-    func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
-    let success = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"tokens":{"output":12}}"#
-    let pending = #"{"role":"assistant","providerID":"opencode","time":{"created":1}}"#
-    let failed = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"error":{"name":"APIError"},"tokens":{"output":0}}"#
-    let sql = """
-    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
-    INSERT INTO message VALUES ('a','s',1000,1000,\(q(success)));
-    INSERT INTO message VALUES ('b','s',5000,5000,\(q(pending)));
-    INSERT INTO message VALUES ('c','s',6000,6000,\(q(failed)));
-    """
-    let created = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, sql], timeout: 20) }
-    try expect(created.succeeded, "test database created")
-    let blockedAt = Date(timeIntervalSince1970: 2) // 2000 ms
-    try expect(!OpenCodeFreeProvider.freeModelSucceeded(since: blockedAt, databaseURL: db), "a pending retry or a failed answer isn't a success")
-
-    let later = #"{"role":"assistant","providerID":"opencode","time":{"created":7,"completed":8},"tokens":{"output":5}}"#
-    let insertLater = "INSERT INTO message VALUES ('d','s',7000,7000,\(q(later)));"
-    _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, insertLater], timeout: 20) }
-    try expect(OpenCodeFreeProvider.freeModelSucceeded(since: blockedAt, databaseURL: db), "a completed free-model answer after the refusal lifts the block")
-}
-
-func testOpenCodeFreeLoggedBlockSnapshot() throws {
-    let blockedAt = ISO8601DateFormatter().date(from: "2026-10-31T14:23:32Z")!
-    let now = blockedAt.addingTimeInterval(60)
-    let live = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: now)
-    let stale = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(2 * 3600))
-    try expect(stale.primary?.displayValue == "?", "a refusal hours old with nothing tried since is 'unknown', not a stale 0%")
-    try expect(stale.primary?.title?.contains("may have reset") == true, "tooltip says why")
-    try expect(live.primary?.remainingPercent == 0 && live.primary?.resetAt == nil && live.primary?.displayValue == nil, "blocked while opencode waits to retry: 0%, no invented countdown")
-    try expect(live.primary?.title?.contains("limit reached at") == true, "the tooltip explains the missing reset time")
-
-    // A stored refusal with Retry-After (opencode gave up) gives the exact countdown.
-    let exact = OpenCodeFreeProvider.snapshot(refusalJSON: realFreeTierRefusal, loggedRefusalAt: blockedAt, now: ISO8601DateFormatter().date(from: "2026-10-30T20:00:00Z")!)
-    try expect(exact.primary?.resetAt != nil, "an exact reset from the database wins")
-
-    let expired = OpenCodeFreeProvider.snapshot(refusalJSON: nil, loggedRefusalAt: blockedAt, now: blockedAt.addingTimeInterval(25 * 3600))
-    try expect(expired.primary?.displayValue == "ready", "an unconfirmed block expires after 24 h")
-}
 
 // MARK: - v0.8.0: banked rate-limit resets
 
@@ -1440,34 +1345,216 @@ func testProcessRunnerStopsOnCondition() throws {
     try expect(!result.timedOut, "stopping early is not a timeout")
 }
 
-func testProviderCountsProbeEvidence() throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-probe-\(UUID().uuidString)")
+// MARK: - v0.9.1: OpenCode Free per model
+
+private func iso(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
+
+func testOpenCodeFreeResetFromRealRefusal() throws {
+    let reset = try expectNonNil(OpenCodeFreeProvider.resetDate(fromRefusal: realFreeTierRefusal), "reset computed")
+    try expect(reset == iso("2026-10-31T00:57:44Z"), "Date header + Retry-After: \(reset)")
+    let entry = OpenCodeFreeProvider.ModelEvidence(lastRefusal: iso("2026-10-30T13:12:49Z"), resetAt: reset)
+    let during = OpenCodeFreeProvider.snapshot(evidence: .init(currentModel: "flint-40b-free", models: ["flint-40b-free": entry]), now: iso("2026-10-30T20:21:00Z"))
+    try expect(during.primary?.remainingPercent == 0 && during.primary?.resetAt == reset, "blocked: 0% with a countdown")
+    try expect(UsageFormatter.metricDisplay(for: during.primary, unavailableLabel: "free", now: iso("2026-10-30T20:21:00Z")).label == "4h36m", "tray counts down to the reset")
+    let after = OpenCodeFreeProvider.snapshot(evidence: .init(currentModel: "flint-40b-free", models: ["flint-40b-free": entry]), now: iso("2026-10-31T01:00:00Z"))
+    try expect(after.primary?.displayValue == "ready", "after the server's reset time: ready")
+    try expect(OpenCodeFreeProvider.snapshot(evidence: .init(currentModel: nil, models: [:]), now: Date()).primary?.displayValue == "ready", "never refused: ready")
+}
+
+func testOpenCodeFreeLimitsArePerModel() throws {
+    // 2026-11-04: deepseek refused at 10:11 MSK, flint answered at 10:25 with nothing in between.
+    let models: [String: OpenCodeFreeProvider.ModelEvidence] = [
+        "deepseek-v4.1-flash-free": .init(lastRefusal: iso("2026-11-04T07:11:26Z")),
+        "flint-40b-free": .init(lastRefusal: iso("2026-11-04T00:48:05Z"), lastAnswer: iso("2026-11-04T07:25:20Z")),
+    ]
+    let now = iso("2026-11-04T07:30:00Z")
+    let onFlint = OpenCodeFreeProvider.snapshot(evidence: .init(currentModel: "flint-40b-free", models: models), now: now)
+    try expect(onFlint.primary?.displayValue == "ready", "flint answered after its own refusal: ready")
+    try expect(onFlint.extraWindows.count == 1 && onFlint.extraWindows[0].displayValue == "blocked"
+               && onFlint.extraWindows[0].title?.hasPrefix("deepseek-v4.1-flash-free") == true, "deepseek's block goes to the tooltip")
+    let onDeepseek = OpenCodeFreeProvider.snapshot(evidence: .init(currentModel: "deepseek-v4.1-flash-free", models: models), now: now)
+    try expect(onDeepseek.primary?.remainingPercent == 0 && onDeepseek.primary?.displayValue == nil, "flint's answer doesn't clear deepseek's refusal")
+}
+
+func testOpenCodeFreeStateAges() throws {
+    let refused = iso("2026-11-04T00:48:05Z")
+    let entry = OpenCodeFreeProvider.ModelEvidence(lastRefusal: refused)
+    try expect(OpenCodeFreeProvider.state(of: entry, now: refused.addingTimeInterval(600)) == .blocked(since: refused, until: nil), "fresh refusal: blocked")
+    try expect(OpenCodeFreeProvider.state(of: entry, now: refused.addingTimeInterval(2 * 3600)) == .unknown(since: refused), "hours old, nothing tried since: unknown")
+    try expect(OpenCodeFreeProvider.state(of: entry, now: refused.addingTimeInterval(25 * 3600)) == .ready, "a day old: assumed reset")
+}
+
+func testOpenCodeFreeReadsFilesPerModel() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-ocpm-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
-    let userLog = dir.appendingPathComponent("user.log"), probeLog = dir.appendingPathComponent("probe.log")
-    try Data().write(to: userLog)
-    let refusedAt = Date().addingTimeInterval(-120)
-    let stamp = ISO8601DateFormatter().string(from: refusedAt)
-    try Data("timestamp=\(stamp) level=ERROR message=\"stream error\" providerID=opencode modelID=x-free error.error=\"Free usage limit reached\"\n".utf8).write(to: probeLog)
-    let userDB = dir.appendingPathComponent("user.db"), probeDB = dir.appendingPathComponent("probe.db")
-    let schema = "CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);"
-    for db in [userDB, probeDB] {
-        _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, schema], timeout: 20) }
-    }
-    func provider() -> OpenCodeFreeProvider {
-        OpenCodeFreeProvider(databaseURL: userDB, logURL: userLog, extraLogURLs: [probeLog], extraDatabaseURLs: [probeDB])
-    }
-    let first = provider()
-    guard case .success(let blocked) = runBlocking({ await first.fetchUsage() }) else { throw TestFailure(description: "fetch") }
-    try expect(blocked.primary?.remainingPercent == 0 && blocked.primary?.displayValue == nil, "the check's refusal counts: 0%")
+    let log = dir.appendingPathComponent("opencode.log"), db = dir.appendingPathComponent("opencode.db"), catalog = dir.appendingPathComponent("free.txt")
+    OpencodeFreeProbe.saveCatalog(["flint-40b-free", "deepseek-v4.1-flash-free", "big-pickle"], to: catalog)
+    let lines = [
+        #"timestamp=2026-11-04T07:00:00.000Z level=ERROR run=1 message="stream error" providerID=opencode modelID=big-pickle session.id=s small=false error.error="AI_APICallError: Free usage limi"#,
+        #"timestamp=2026-11-04T07:11:25.829Z level=INFO run=2 message=stream providerID=opencode modelID=deepseek-v4.1-flash-free session.id=s small=false agent=build"#,
+        #"timestamp=2026-11-04T07:11:26.410Z level=ERROR run=2 message="stream error" providerID=opencode modelID=deepseek-v4.1-flash-free session.id=s small=false error.error="AI_APICallError: Free usage limi"#,
+        #"timestamp=2026-11-04T07:12:00.000Z level=ERROR run=3 message="stream error" providerID=openrouter modelID=x-free error.error="Free usage limit reached elsewhere""#,
+        #"timestamp=2026-11-04T07:25:18.000Z level=INFO run=4 message=stream providerID=opencode modelID=flint-40b-free session.id=s small=false agent=build"#,
+    ]
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: log)
+    func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
+    let flintAnswer = #"{"role":"assistant","providerID":"opencode","modelID":"flint-40b-free","time":{"created":1,"completed":2},"tokens":{"output":3}}"#
+    let paidAnswer = #"{"role":"assistant","providerID":"opencode","modelID":"claude-sonnet-5-5","time":{"created":1,"completed":2},"tokens":{"output":9}}"#
+    let ms = { (d: Date) in Int64(d.timeIntervalSince1970 * 1000) }
+    let sql = """
+    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
+    INSERT INTO message VALUES ('a','s',\(ms(iso("2026-11-04T07:25:20Z"))),0,\(q(flintAnswer)));
+    INSERT INTO message VALUES ('b','s',\(ms(iso("2026-11-04T07:20:00Z"))),0,\(q(paidAnswer)));
+    """
+    let created = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [db.path, sql], timeout: 20) }
+    try expect(created.succeeded, "test database created")
+    let provider = OpenCodeFreeProvider(databaseURL: db, logURL: log, extraLogURLs: [], extraDatabaseURLs: [], catalogURL: catalog,
+                                        now: { iso("2026-11-04T07:30:00Z") })
+    let evidence = provider.evidence()
+    try expect(evidence.currentModel == "flint-40b-free", "current model = the user's latest free-tier request")
+    try expect(evidence.models["deepseek-v4.1-flash-free"]?.isBlocked == true, "a paid model's answer doesn't clear a free model's refusal")
+    try expect(evidence.models["big-pickle"]?.lastRefusal != nil, "free by catalog price, not name: big-pickle counts")
+    try expect(evidence.models["x-free"] == nil, "another provider's refusal is ignored")
+    try expect(evidence.models["flint-40b-free"]?.isBlocked != true, "flint is fine")
+    guard case .success(let snapshot) = runBlocking({ await provider.fetchUsage() }) else { throw TestFailure(description: "fetch") }
+    try expect(snapshot.primary?.displayValue == "ready" && snapshot.extraWindows.count == 2, "headline ready; deepseek and big-pickle in the tooltip")
+}
 
-    let ms = Int64(Date().timeIntervalSince1970 * 1000)
-    let answer = #"{"role":"assistant","providerID":"opencode","time":{"created":1,"completed":2},"tokens":{"output":3}}"#.replacingOccurrences(of: "'", with: "''")
-    let insert = "INSERT INTO message VALUES ('a','s',\(ms),\(ms),'\(answer)');"
-    _ = runBlocking { await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"), arguments: [probeDB.path, insert], timeout: 20) }
-    let second = provider()
-    guard case .success(let ready) = runBlocking({ await second.fetchUsage() }) else { throw TestFailure(description: "fetch 2") }
-    try expect(ready.primary?.displayValue == "ready", "the check's answer counts: ready")
+func testFreeCatalogFromVerboseOutput() throws {
+    let verbose = """
+    opencode/beam-free
+    {
+      "id": "beam-free",
+      "cost": { "input": 0, "output": 0, "cache": { "read": 0, "write": 0 } },
+      "status": "active"
+    }
+    opencode/big-pickle
+    {
+      "id": "big-pickle",
+      "cost": { "input": 0, "output": 0 },
+      "status": "active"
+    }
+    opencode/claude-sonnet-5-5
+    {
+      "id": "claude-sonnet-5-5",
+      "cost": { "input": 3, "output": 15 },
+      "status": "active"
+    }
+    opencode/old-free
+    {
+      "id": "old-free",
+      "cost": { "input": 0, "output": 0 },
+      "status": "deprecated"
+    }
+    """
+    try expect(OpencodeFreeProbe.freeModels(fromCatalog: verbose) == ["beam-free", "big-pickle"], "free = zero cost and not deprecated: \(OpencodeFreeProbe.freeModels(fromCatalog: verbose))")
+    let env = OpencodeFreeProbe.environment(base: ["OPENCODE_CONFIG": "/u/c.json", "OPENCODE_CONFIG_CONTENT": "{}", "HTTPS_PROXY": "http://p", "PATH": "/bin"])
+    try expect(env["OPENCODE_CONFIG"] == nil && env["OPENCODE_CONFIG_CONTENT"] == nil, "the user's opencode overrides don't reach the clean profile")
+    try expect(env["HTTPS_PROXY"] == "http://p" && env["XDG_CONFIG_HOME"]?.contains("opencode-probe") == true, "proxy kept, profile isolated")
+}
+
+func testOpenCodeFreeScansTruncatedLogLines() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-oclog-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let log = dir.appendingPathComponent("opencode.log")
+    try Data(realOpencodeLogTail.utf8).write(to: log)
+    let scan = OpenCodeFreeProvider.scanLog(log)
+    let at = try expectNonNil(scan.refusals["deepseek-v4.1-flash-free"], "refusal found despite truncated line")
+    try expect(abs(at.timeIntervalSince(iso("2026-10-31T14:23:38Z")) - 0.965) < 0.01, "newest refusal of that model: \(at)")
+    try expect(scan.refusals.count == 1, "other providers ignored")
+}
+
+// MARK: - v0.9.1: review fixes
+
+func testAvailabilityStatesAreNotPercentages() throws {
+    let blocked = UsageWindow(windowLabel: "free", remainingPercent: 0, resetAt: nil, availabilityOnly: true)
+    let ready = UsageWindow(windowLabel: "free", remainingPercent: 100, resetAt: nil, displayValue: "ready", availabilityOnly: true)
+    try expect(!blocked.isQuantitative && !ready.isQuantitative, "OpenCode Free states aren't quota shares")
+    let evaluator = NotificationEvaluator(threshold: .tenPercent)
+    var store = NotificationCycleStore()
+    let now = Date()
+    let low = evaluator.decisions(activeProvider: .opencodeFree, snapshots: [.opencodeFree: UsageSnapshot(primary: blocked, secondary: nil, fetchedAt: now)], store: &store, now: now)
+    try expect(low.isEmpty, "a refusal isn't a 'below 10% left' notification")
+    let back = evaluator.recoveryDecisions(activeProvider: .opencodeFree, snapshots: [.opencodeFree: UsageSnapshot(primary: ready, secondary: nil, fetchedAt: now)], store: &store, now: now)
+    try expect(back.isEmpty, "'ready' isn't announced as '100% available'")
+    var tracker = UsageDeltaTracker()
+    tracker.record(provider: .opencodeFree, snapshot: UsageSnapshot(primary: ready, secondary: nil, fetchedAt: now))
+    tracker.record(provider: .opencodeFree, snapshot: UsageSnapshot(primary: blocked, secondary: nil, fetchedAt: now))
+    try expect(tracker.dominantProvider() == nil, "ready → blocked isn't usage for Smart Auto Switch")
+}
+
+/// Refresh answers with rotated tokens; usage refuses every access token.
+private final class RotatingRefreshClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var refreshTokensSent: [String] = []
+    var refreshes: [String] { lock.withLock { refreshTokensSent } }
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        if request.httpMethod == "POST" {
+            let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            let sent = body.components(separatedBy: "&").first { $0.hasPrefix("refresh_token=") }?.dropFirst("refresh_token=".count) ?? ""
+            lock.withLock { refreshTokensSent.append(String(sent)) }
+            return HTTPResponse(data: Data(#"{"access_token":"new-access","refresh_token":"rt-2","expires_in":3600}"#.utf8), statusCode: 200)
+        }
+        return HTTPResponse(data: Data(), statusCode: 401)
+    }
+}
+
+private final class Box<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    var get: T { lock.withLock { value } }
+    func set(_ new: T) { lock.withLock { value = new } }
+}
+
+func testPreemptiveRefreshNeverReusesTheSpentToken() throws {
+    let reader = StubClaudeReader([ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "old", refreshToken: "rt-1", expiresAt: pastMillis), source: .claudexbar)])
+    let http = RotatingRefreshClient()
+    let saved = Box<ClaudeCredentials?>(nil)
+    let provider = ClaudeProvider(credentialReader: reader, httpClient: http, persistRefreshed: { saved.set($0) })
+    let result = runBlocking { await provider.fetchUsage() }
+    guard case .failure(.authExpired) = result else { throw TestFailure(description: "expected authExpired, got \(result)") }
+    try expect(http.refreshes == ["rt-1"], "one refresh with the stored token, never a second with the spent one: \(http.refreshes)")
+    try expect(saved.get?.refreshToken == "rt-2", "the rotated token is saved")
+    try expect(reader.discardCount == 0, "the freshly saved session isn't thrown away")
+}
+
+func testClaudeWithoutWeeklyWindowHasNoFakeZero() throws {
+    let body = Data(#"{"five_hour":{"utilization":20,"resets_at":"2026-11-04T12:00:00Z"}}"#.utf8)
+    let snapshot = try ClaudeProvider.parseUsageResponse(body, fetchedAt: Date())
+    try expect(snapshot.primary?.remainingPercent == 80, "session parsed")
+    try expect(snapshot.secondary == nil, "no weekly field: no weekly window, not 0%")
+}
+
+func testExecutableResolverFindsNonStandardInstalls() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-res-\(UUID().uuidString)")
+    let bin = dir.appendingPathComponent(".nvm/versions/node/v24.1.0/bin")
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let tool = bin.appendingPathComponent("cxb-test-cli")
+    try Data("#!/bin/sh\n".utf8).write(to: tool)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+    let dirs = ExecutableResolver.searchDirectories(home: dir.path, inheritedPath: "/usr/bin", loginShell: [])
+    try expect(ExecutableResolver.find("cxb-test-cli", directories: dirs)?.path == tool.path, "found under nvm")
+    try expect(!dirs.contains { $0.contains("ipang") }, "no hard-coded foreign home")
+    try expect(ExecutableResolver.find("no-such-cli-xyz", directories: dirs) == nil, "missing tool -> nil")
+}
+
+func testProcessRunnerStopsChildrenToo() throws {
+    let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cxb-tree-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: marker) }
+    // A shell that starts a long-running child and records its pid.
+    let script = "sleep 60 & echo $! > \(marker.path); wait"
+    let result = runBlocking {
+        await ProcessRunner.run(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script], timeout: 2)
+    }
+    try expect(result.timedOut, "timed out as set")
+    Thread.sleep(forTimeInterval: 4)
+    let childPid = Int32((try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+    try expect(childPid > 0, "child pid recorded")
+    try expect(kill(childPid, 0) != 0, "the child was stopped with its parent")
 }
 
 func testResetLabelsUseAbsoluteResetDates() throws {
@@ -2119,11 +2206,21 @@ func testRecoveryNotificationEvaluatesAllEnabledSources() throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("availability states are not percentages", testAvailabilityStatesAreNotPercentages),
+    ("preemptive refresh never reuses the spent token", testPreemptiveRefreshNeverReusesTheSpentToken),
+    ("Claude without weekly window has no fake zero", testClaudeWithoutWeeklyWindowHasNoFakeZero),
+    ("executable resolver finds non-standard installs", testExecutableResolverFindsNonStandardInstalls),
+    ("process runner stops children too", testProcessRunnerStopsChildrenToo),
+    ("OpenCode Free reset from real refusal", testOpenCodeFreeResetFromRealRefusal),
+    ("OpenCode Free limits are per model", testOpenCodeFreeLimitsArePerModel),
+    ("OpenCode Free state ages", testOpenCodeFreeStateAges),
+    ("OpenCode Free reads files per model", testOpenCodeFreeReadsFilesPerModel),
+    ("free catalog from verbose output; clean env", testFreeCatalogFromVerboseOutput),
+    ("OpenCode Free scans truncated log lines", testOpenCodeFreeScansTruncatedLogLines),
     ("probe catalog and model choice", testProbeCatalogAndModelChoice),
     ("probe outcome classification", testProbeOutcomeClassification),
     ("probe schedule", testProbeSchedule),
     ("process runner stops on condition", testProcessRunnerStopsOnCondition),
-    ("provider counts probe evidence", testProviderCountsProbeEvidence),
     ("plan labels", testPlanLabels),
     ("providers carry plan labels", testProvidersCarryPlanLabels),
     ("Claude included credit from real response", testClaudeIncludedCreditFromRealResponse),
@@ -2132,17 +2229,12 @@ let tests: [(String, () throws -> Void)] = [
     ("Claude banked reset parsing", testClaudeBankedResetParsing),
     ("Codex provider attaches resets and caches details", testCodexProviderAttachesResetsAndCachesDetails),
     ("Claude request asks for banked resets", testClaudeRequestAsksForBankedResets),
-    ("OpenCode Free reads latest logged refusal", testOpenCodeFreeReadsLatestLoggedRefusal),
-    ("OpenCode Free detects success after refusal", testOpenCodeFreeDetectsSuccessAfterRefusal),
-    ("OpenCode Free logged-block snapshot", testOpenCodeFreeLoggedBlockSnapshot),
     ("providers list alphabetically", testProvidersListAlphabetically),
     ("golden hour decisions", testGoldenHourDecisions),
     ("golden hour chain hits target without skipping windows", testGoldenHourChainHitsTargetWithoutSkippingWindows),
     ("golden hour miss detection", testGoldenHourMissDetection),
     ("auto-start caps follow window length", testAutoStartCapsFollowWindowLength),
     ("CLI update selection defaults", testCLIUpdateSelectionDefaults),
-    ("OpenCode Free reset from real refusal", testOpenCodeFreeResetFromRealRefusal),
-    ("OpenCode Free reads newest refusal from database", testOpenCodeFreeReadsNewestRefusalFromDatabase),
     ("opencode CLI version and capabilities", testOpencodeCLIVersionAndCapabilities),
     ("OpenRouter parses quota and credits", testOpenRouterParsesQuotaAndCredits),
     ("OpenRouter prefers key limit; partial quota", testOpenRouterPrefersKeyLimitAndPartialQuota),

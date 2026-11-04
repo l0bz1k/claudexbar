@@ -56,19 +56,21 @@ public struct ClaudeProvider: UsageProvider {
         let credentials = candidate.credentials
         let mayRefresh = candidate.source.mayRefresh
         do {
-            let accessToken: String
             if Self.isExpired(credentials.expiresAt, now: now()) {
                 // Someone else's expired credential is left alone: Claude Code
                 // refreshes its own token the next time it runs.
                 guard mayRefresh, let refreshToken = credentials.refreshToken else {
                     return .failure(.authExpired)
                 }
-                accessToken = try await refreshAccessToken(refreshToken)
-            } else {
-                accessToken = credentials.accessToken
+                let refreshed = try await refreshAccessToken(refreshToken)
+                // Claude rotates the refresh token on every refresh: the old one
+                // is spent, the new one is already saved. If the brand-new access
+                // token still gets a 401, don't refresh again in this poll — a
+                // second refresh with the spent token would fail and discard the
+                // freshly saved session.
+                return try await fetchUsage(accessToken: refreshed.accessToken, refreshToken: refreshed.refreshToken, allowRefresh: false)
             }
-
-            return try await fetchUsage(accessToken: accessToken, refreshToken: mayRefresh ? credentials.refreshToken : nil)
+            return try await fetchUsage(accessToken: credentials.accessToken, refreshToken: mayRefresh ? credentials.refreshToken : nil)
         } catch let error as UsageError {
             return .failure(error)
         } catch is DecodingError {
@@ -96,12 +98,16 @@ public struct ClaudeProvider: UsageProvider {
                 resetAt: ISO8601DateFormatter.parseClaudexDate(fiveHour.resetsAt),
                 windowDuration: 5 * 60 * 60
             ),
-            secondary: UsageWindow(
-                windowLabel: "7d",
-                remainingPercent: sevenDay.map { clampPercent(100 - $0.utilization) } ?? 0,
-                resetAt: ISO8601DateFormatter.parseClaudexDate(sevenDay?.resetsAt),
-                windowDuration: 7 * 24 * 60 * 60
-            ),
+            // No weekly field at all (a plan or response shape without one)
+            // means no weekly window — not a made-up 0%.
+            secondary: sevenDay.map { week in
+                UsageWindow(
+                    windowLabel: "7d",
+                    remainingPercent: clampPercent(100 - week.utilization),
+                    resetAt: ISO8601DateFormatter.parseClaudexDate(week.resetsAt),
+                    windowDuration: 7 * 24 * 60 * 60
+                )
+            },
             fetchedAt: fetchedAt
         )
     }
@@ -131,7 +137,7 @@ public struct ClaudeProvider: UsageProvider {
         return expiresAt < nowMs + 60_000
     }
 
-    private func fetchUsage(accessToken: String, refreshToken: String?) async throws -> Result<UsageSnapshot, UsageError> {
+    private func fetchUsage(accessToken: String, refreshToken: String?, allowRefresh: Bool = true) async throws -> Result<UsageSnapshot, UsageError> {
         var request = URLRequest(url: usageURL)
         request.setValue("Bearer \(stripBearerPrefix(accessToken))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -147,10 +153,11 @@ public struct ClaudeProvider: UsageProvider {
                 .withCredit(BankedResetParser.claudeIncludedCredit(response.data))
             return .success(snapshot.withPlan(await planLabel(accessToken: accessToken)))
         case 401:
-            guard let refreshToken else { return .failure(.authExpired) }
+            // Just refreshed: a second refresh in the same poll won't help.
+            guard allowRefresh, let refreshToken else { return .failure(.authExpired) }
             do {
                 let refreshed = try await refreshAccessToken(refreshToken)
-                return try await fetchUsage(accessToken: refreshed, refreshToken: nil)
+                return try await fetchUsage(accessToken: refreshed.accessToken, refreshToken: nil)
             } catch {
                 return .failure(.authExpired)
             }
@@ -161,7 +168,7 @@ public struct ClaudeProvider: UsageProvider {
         }
     }
 
-    private func refreshAccessToken(_ refreshToken: String) async throws -> String {
+    private func refreshAccessToken(_ refreshToken: String) async throws -> ClaudeCredentials {
         var request = URLRequest(url: refreshURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -189,7 +196,7 @@ public struct ClaudeProvider: UsageProvider {
         // Persist the rotated credential so the next refresh uses the new
         // refresh token (Claude rotates it on every refresh).
         persistRefreshed?(refreshed)
-        return refreshed.accessToken
+        return refreshed
     }
 
     public static func parseRefreshResponse(_ data: Data, fallbackRefreshToken: String, now: Date) -> ClaudeCredentials? {

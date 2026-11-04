@@ -142,7 +142,8 @@ public struct NotificationEvaluator: Sendable {
                 window.map { (kind, $0) }
             }
             .filter { kind, window in
-                window.remainingPercent <= remainingLimit
+                window.isQuantitative
+                    && window.remainingPercent <= remainingLimit
                     && !store.hasDelivered(provider: activeProvider, kind: kind, resetAt: window.resetAt)
             }
             .sorted { left, right in
@@ -221,7 +222,7 @@ public struct NotificationEvaluator: Sendable {
             (.secondary, source.snapshot.secondary)
         ]
         return windows.compactMap { kind, optionalWindow in
-            guard let window = optionalWindow else { return nil }
+            guard let window = optionalWindow, window.isQuantitative else { return nil }
             if window.remainingPercent <= Self.depletedRecoveryLimit {
                 store.markDepleted(provider: source.provider, kind: kind)
                 return nil

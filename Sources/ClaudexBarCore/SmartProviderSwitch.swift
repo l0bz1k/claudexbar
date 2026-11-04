@@ -53,11 +53,13 @@ public struct UsageDeltaTracker: Sendable {
     public init() {}
 
     public mutating func record(provider: ProviderID, snapshot: UsageSnapshot) {
-        guard let remaining = snapshot.primary?.remainingPercent else {
+        // A refused/ready flip (OpenCode Free) isn't usage.
+        guard let window = snapshot.primary, window.isQuantitative else {
             lastRemaining.removeValue(forKey: provider)
             deltas.removeValue(forKey: provider)
             return
         }
+        let remaining = window.remainingPercent
         if let previous = lastRemaining[provider] {
             deltas[provider] = max(0, previous - remaining)
         }

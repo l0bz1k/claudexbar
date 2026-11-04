@@ -29,6 +29,14 @@ enum OpencodeFreeProbeRunner {
         if OpencodeFreeProbe.size(of: OpencodeFreeProbe.databaseURL) > 20_000_000 {
             try? fileManager.removeItem(at: OpencodeFreeProbe.dataDirectory.appendingPathComponent("opencode/opencode.db"))
         }
+        // Bound the log too, keeping its recent end (the latest refusals per
+        // model live there). Safe: opencode isn't running between checks.
+        let log = OpencodeFreeProbe.logURL
+        if OpencodeFreeProbe.size(of: log) > 2_000_000 {
+            let keep = OpencodeFreeProbe.contents(of: log, after: OpencodeFreeProbe.size(of: log) - 256_000)
+            let lines = keep.split(separator: "\n", omittingEmptySubsequences: false).dropFirst() // drop the partial first line
+            try? lines.joined(separator: "\n").write(to: log, atomically: true, encoding: .utf8)
+        }
     }
 
     /// The free models the installed opencode currently lists.
@@ -36,13 +44,15 @@ enum OpencodeFreeProbeRunner {
         prepare()
         let result = await ProcessRunner.run(
             executable: executable,
-            arguments: ["models", "opencode"],
+            arguments: ["models", "opencode", "--verbose"],
             environment: environment,
             workingDirectory: workDirectory,
             timeout: 60,
-            outputLimit: 256 * 1024
+            outputLimit: 2 * 1024 * 1024
         )
-        return OpencodeFreeProbe.freeModels(fromCatalog: result.stdout)
+        let models = OpencodeFreeProbe.freeModels(fromCatalog: result.stdout)
+        if !models.isEmpty { OpencodeFreeProbe.saveCatalog(models) }
+        return models
     }
 
     /// Asks one free model once. Stops opencode as soon as its log has the
@@ -53,7 +63,8 @@ enum OpencodeFreeProbeRunner {
         let offset = OpencodeFreeProbe.size(of: logURL)
         let result = await ProcessRunner.run(
             executable: executable,
-            arguments: ["run", "--model", "opencode/\(model)", OpencodeFreeProbe.prompt],
+            // --pure: no external plugins even if some reach the clean profile.
+            arguments: ["run", "--pure", "--model", "opencode/\(model)", OpencodeFreeProbe.prompt],
             environment: environment,
             workingDirectory: workDirectory,
             timeout: 120,

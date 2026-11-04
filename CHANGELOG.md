@@ -3,6 +3,50 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-11-04
+
+Fixes from a full code review (Codex, gpt-6-luna), plus one display change.
+
+### Changed
+- **Last known data stays in the tray, dimmed.** When a provider can't be
+  reached (network, rate limit, server hiccup), or hasn't answered yet since
+  launch, the tray keeps its last numbers drawn semi-transparent instead of
+  the status word; full opacity returns with fresh data. Last data now
+  survives a restart. The menu still shows the status word, and anything
+  needing your action ("auth", "vpn") still shows as a word in the tray too.
+
+### Fixed
+- **OpenCode Free tracks limits per model.** The free tier refuses one model
+  while another answers, but every refusal and answer used to count for all
+  of them, and a paid model's answer could even clear a free model's block.
+  Now each free model has its own evidence; only an answer from the same model
+  clears its refusal. The headline is the model you use (your latest request);
+  other recently refused ones are listed in the tooltip, and the hourly check
+  asks your model.
+- Free models are recognised by price from opencode's catalog
+  (`opencode models opencode --verbose`), not by a `-free` suffix:
+  `big-pickle` is free too.
+- OpenCode Free's "ready", "?" and refusal are availability states, not quota
+  percentages: they no longer trigger "below N% left" or "100% available"
+  notifications, feed Smart Auto Switch, or read as "% left" in the tooltip.
+- The OpenCode Free check's clean profile can't be overridden by inherited
+  `OPENCODE_*` variables (proxy settings are kept), runs with `--pure`, and
+  its log is kept bounded.
+- Claude: after an automatic token refresh, a 401 no longer triggers a second
+  refresh with the already-spent token (which could discard the freshly saved
+  session).
+- Claude: a usage response without any weekly field no longer shows a made-up
+  0% weekly window.
+- Self-update: the previous version is kept in
+  `~/Library/Application Support/ClaudexBar/Previous` until the new one has
+  run for a minute; if the new version won't launch, the previous one is put
+  back; if both swap and restore fail, it's never deleted.
+- CLIs are found the same way everywhere (checks, updates, auto-start,
+  re-auth): usual install locations (Homebrew, MacPorts, ~/.local/bin, Bun,
+  Volta, pnpm, nvm, mise/asdf) and your login shell's PATH. Re-auth no longer
+  carries a hard-coded path from the original project.
+- Commands stopped on timeout or early also stop the processes they started.
+
 ## [0.9.0] — 2026-11-04
 
 ### Added

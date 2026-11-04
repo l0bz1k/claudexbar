@@ -36,7 +36,7 @@ A small native macOS menu-bar app that shows how much of your AI coding limits i
 | **Codex** | 5-hour session · weekly limit (or the 30-day quota on the ChatGPT Go plan) | ChatGPT's usage endpoint, with Codex's login from `~/.codex/auth.json` |
 | **OpenRouter** | free-model requests left today · credit balance (or the key's own spending limit) | OpenRouter's API, with the key opencode stores |
 | **OpenCode Go** | 5-hour limit · the tighter of the weekly/monthly limits (all three in the tooltip) | the official `opencode.ai/zen/go/v1/usage` endpoint, with your Go key |
-| **OpenCode Free** | `ready`, `0%` while the free tier is blocked, `?` when unknown — optionally checked hourly | opencode's local database (read-only, no network) — see below |
+| **OpenCode Free** | your current free model: `ready`, `0%` while it's refused, `?` when unknown — optionally checked hourly; other refused models in the tooltip | opencode's local database (read-only, no network) — see below |
 
 The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/share/opencode/auth.json`) or from `OPENROUTER_API_KEY` / `OPENCODE_API_KEY`, so if opencode works, ClaudexBar does too. A provider with nothing configured shows `no key`.
 
@@ -131,7 +131,7 @@ In the tray, the left column is the session (5-hour) window and the right column
 | `vpn` | Cloudflare blocked your IP (often a VPN/proxy exit) — the tooltip names it | Switch to another proxy node |
 | `err` | An unexpected answer from the service | **Copy Diagnostics** and open an issue |
 
-Temporary problems (a rate limit, a network blip) don't replace the figures: the last known values stay on screen, and after an HTTP 429 the next request to that service waits 2, 4, 8… minutes (up to 10). **Refresh All** always goes out immediately.
+Temporary problems (a rate limit, a network blip) don't blank the tray: the last known values stay there, dimmed (they survive a restart too), while the menu shows the status word; and after an HTTP 429 the next request to that service waits 2, 4, 8… minutes (up to 10). **Refresh All** always goes out immediately.
 
 ## Troubleshooting
 
