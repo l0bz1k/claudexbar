@@ -851,9 +851,11 @@ final class StatusBarController: NSObject {
     }
 
     private func nextOpencodeFreeCheck() -> Date {
-        OpencodeFreeProbe.nextCheck(
-            lastRefusal: opencodeFreeProvider?.currentModelRefusal().refusal,
+        let current = opencodeFreeProvider?.currentModelRefusal()
+        return OpencodeFreeProbe.nextCheck(
+            lastRefusal: current?.refusal,
             lastCheck: settings.opencodeFreeProbeLastAt,
+            lastAnswer: current?.lastAnswer,
             inconclusiveStreak: settings.opencodeFreeProbeStreak
         )
     }
@@ -886,11 +888,10 @@ final class StatusBarController: NSObject {
     }
 
     private func maybeCheckOpencodeFree(snapshot: UsageSnapshot) {
+        // "ready" is checked too: it only means no refusal is known, and the
+        // limit can run out without any (another app, another Mac behind the
+        // same IP, a quiet daily reset that didn't happen).
         guard settings.opencodeFreeProbeEnabled, !opencodeFreeProbeInFlight else { return }
-        if snapshot.primary?.displayValue == "ready" {
-            settings.opencodeFreeProbeStreak = 0
-            return
-        }
         guard opencodeMajorVersion.map({ $0 < 2 }) ?? true,
               Date() >= nextOpencodeFreeCheck(),
               let executable = CLIExecutableLocator.executable(for: .opencodeFree) else { return }

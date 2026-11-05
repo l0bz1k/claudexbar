@@ -1329,6 +1329,8 @@ func testProbeSchedule() throws {
     try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t, inconclusiveStreak: 1) == t.addingTimeInterval(900), "couldn't tell: again in 15 min")
     try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t, inconclusiveStreak: 3) == t.addingTimeInterval(3600), "backoff capped at an hour")
     try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: nil, inconclusiveStreak: 0) < t, "never checked: due now")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t, lastAnswer: t.addingTimeInterval(1800), inconclusiveStreak: 0) == t.addingTimeInterval(5400), "your own answer postpones the check: nothing sent while in use")
+    try expect(OpencodeFreeProbe.nextCheck(lastRefusal: nil, lastCheck: t.addingTimeInterval(-7200), lastAnswer: t.addingTimeInterval(-7200), inconclusiveStreak: 0) < t, "a 'ready' older than an hour is due for a check")
 }
 
 func testProcessRunnerStopsOnCondition() throws {

@@ -133,12 +133,12 @@ public struct OpenCodeFreeProvider: UsageProvider {
 
     /// The headline model and, if it's refused, when — what the next check is
     /// timed from.
-    public func currentModelRefusal() -> (model: String?, refusal: Date?) {
+    public func currentModelRefusal() -> (model: String?, refusal: Date?, lastAnswer: Date?) {
         let evidence = evidence()
-        guard let model = evidence.currentModel, let entry = evidence.models[model], entry.isBlocked else {
-            return (evidence.currentModel, nil)
+        guard let model = evidence.currentModel, let entry = evidence.models[model] else {
+            return (evidence.currentModel, nil, nil)
         }
-        return (model, entry.lastRefusal)
+        return (model, entry.isBlocked ? entry.lastRefusal : nil, entry.lastAnswer)
     }
 
     public func fetchUsage() async -> Result<UsageSnapshot, UsageError> {

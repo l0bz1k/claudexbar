@@ -3,6 +3,17 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.3] — 2026-11-05
+
+### Fixed
+- **OpenCode Free could show "ready" while the free tier was used up.**
+  "ready" only meant no refusal was known; the hourly check skipped it, so a
+  limit used up elsewhere (another app or Mac behind the same IP, a daily reset
+  that didn't happen) stayed hidden until opencode itself was run. With
+  "Check OpenCode Free Hourly" on, "ready" is now confirmed at least hourly
+  too. While you're using the model, your own answers count as confirmation
+  and no check is sent.
+
 ## [0.10.2] — 2026-11-04
 
 ### Fixed

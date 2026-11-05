@@ -152,11 +152,14 @@ public enum OpencodeFreeProbe {
     /// When the next check is due: an hour after the latest evidence (anyone's
     /// refusal, or the last check); after checks that couldn't tell, sooner —
     /// 15, 30, 60 min.
-    public static func nextCheck(lastRefusal: Date?, lastCheck: Date?, inconclusiveStreak: Int) -> Date {
+    /// An hour after the latest thing known about the model — a refusal, an
+    /// answer (yours or a check's) or a check — so "ready" is never older
+    /// than an hour, and nothing is sent while you're using it anyway.
+    public static func nextCheck(lastRefusal: Date?, lastCheck: Date?, lastAnswer: Date? = nil, inconclusiveStreak: Int) -> Date {
         let interval: TimeInterval = inconclusiveStreak > 0
             ? min(3600, 900 * pow(2, Double(inconclusiveStreak - 1)))
             : 3600
-        let base = [lastRefusal, lastCheck].compactMap { $0 }.max() ?? .distantPast
+        let base = [lastRefusal, lastCheck, lastAnswer].compactMap { $0 }.max() ?? .distantPast
         return base.addingTimeInterval(interval)
     }
 
