@@ -3,6 +3,20 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.4] — 2026-11-08
+
+### Fixed
+- **The OpenCode Free check no longer uses up the free limit itself.** A
+  check that gets an answer is a full opencode request (~12k tokens), and
+  confirming "ready" every hour was enough to exhaust the free tier within a
+  day even with opencode unused. Now:
+  - "ready" is confirmed every 3 hours; while refused, checks stay hourly (a
+    refused request costs nothing);
+  - the check no longer sends a second request to title its session;
+  - it no longer includes `~/.claude/CLAUDE.md` and `~/.claude/skills` in the
+    prompt (opencode picks them up by default) — smaller, and nothing of yours
+    is sent along.
+
 ## [0.10.3] — 2026-11-05
 
 ### Fixed

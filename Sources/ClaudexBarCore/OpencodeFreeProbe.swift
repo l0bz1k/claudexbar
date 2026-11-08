@@ -40,6 +40,11 @@ public enum OpencodeFreeProbe {
             "XDG_DATA_HOME": dataDirectory.path,
             "XDG_CACHE_HOME": directory.appendingPathComponent("cache").path,
             "XDG_STATE_HOME": directory.appendingPathComponent("state").path,
+            // Every request counts against the free limit, so keep the check
+            // small: without these, opencode adds ~/.claude/CLAUDE.md and all
+            // of ~/.claude/skills to the prompt (and would send them along).
+            "OPENCODE_DISABLE_CLAUDE_CODE": "1",
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
         ]) { _, new in new }
     }
 
@@ -152,13 +157,20 @@ public enum OpencodeFreeProbe {
     /// When the next check is due: an hour after the latest evidence (anyone's
     /// refusal, or the last check); after checks that couldn't tell, sooner —
     /// 15, 30, 60 min.
-    /// An hour after the latest thing known about the model — a refusal, an
-    /// answer (yours or a check's) or a check — so "ready" is never older
-    /// than an hour, and nothing is sent while you're using it anyway.
+    /// Timed from the latest thing known about the model — a refusal, an
+    /// answer (yours or a check's) or a check. While refused: hourly (a
+    /// refused request costs nothing). While ready: every 3 hours — a check
+    /// that gets an answer uses up part of the free limit itself, and hourly
+    /// ones were enough to exhaust it in a day. Nothing is sent while you're
+    /// using the model anyway.
+    public static let blockedInterval: TimeInterval = 3600
+    public static let readyInterval: TimeInterval = 3 * 3600
+
     public static func nextCheck(lastRefusal: Date?, lastCheck: Date?, lastAnswer: Date? = nil, inconclusiveStreak: Int) -> Date {
+        let regular = lastRefusal == nil ? readyInterval : blockedInterval
         let interval: TimeInterval = inconclusiveStreak > 0
-            ? min(3600, 900 * pow(2, Double(inconclusiveStreak - 1)))
-            : 3600
+            ? min(regular, 900 * pow(2, Double(inconclusiveStreak - 1)))
+            : regular
         let base = [lastRefusal, lastCheck, lastAnswer].compactMap { $0 }.max() ?? .distantPast
         return base.addingTimeInterval(interval)
     }

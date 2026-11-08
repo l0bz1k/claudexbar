@@ -64,7 +64,8 @@ enum OpencodeFreeProbeRunner {
         let result = await ProcessRunner.run(
             executable: executable,
             // --pure: no external plugins even if some reach the clean profile.
-            arguments: ["run", "--pure", "--model", "opencode/\(model)", OpencodeFreeProbe.prompt],
+            // --title: no extra model request to name the session.
+            arguments: ["run", "--pure", "--title", "ClaudexBar check", "--model", "opencode/\(model)", OpencodeFreeProbe.prompt],
             environment: environment,
             workingDirectory: workDirectory,
             timeout: 120,
