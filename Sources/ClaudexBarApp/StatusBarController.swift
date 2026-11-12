@@ -14,6 +14,8 @@ final class StatusBarController: NSObject {
         // credential stays valid without re-login.
         .claude: ClaudeProvider(persistRefreshed: { credentials in
             try? ClaudeCredentialStore().save(credentials)
+        }, diagnostics: { line in
+            SanitizedLogger.shared.log(provider: .claude, message: line)
         }),
         .openrouter: OpenRouterProvider(),
         .opencodeGo: OpenCodeGoProvider(),
@@ -86,6 +88,7 @@ final class StatusBarController: NSObject {
     func start() {
         AppUpdater.scheduleBackupCleanup()
         ExecutableResolver.warmUp()
+        CLIUpdateManager.refreshClaudeCodeIdentity()
         AppPaths.ensureDirectories()
         AppPaths.housekeeping()
         settings.removeLegacyCodexAccountSettings()
@@ -1394,6 +1397,7 @@ final class StatusBarController: NSObject {
         let selected = settings.cliUpdateProviders
         Task { [weak self] in
             let results = await CLIUpdateManager.shared.updateAll(providers: selected)
+            CLIUpdateManager.refreshClaudeCodeIdentity()
             let snapshot = await CLIUpdateManager.shared.snapshot()
             guard let self else { return }
             await MainActor.run {

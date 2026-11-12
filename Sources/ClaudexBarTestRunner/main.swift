@@ -2269,7 +2269,23 @@ func testPlanCacheIsPerCredential() throws {
     try expect(cache.last(key: b) == nil && cache.last(key: a) == nil, "old account forgotten")
 }
 
+
+// MARK: - v0.10.5: Claude banked resets need Claude Code's identity
+
+func testClaudeIdentityAndResetsStatus() throws {
+    try expect(ClaudeCodeIdentity.userAgent(version: "2.1.400") == "claude-cli/2.1.400 (external, cli)", "Claude Code's user agent format")
+    try expect(ClaudeCodeIdentity.userAgent(version: nil).hasPrefix("claude-cli/\(ClaudeCodeIdentity.fallbackVersion) "), "fallback version without Claude Code installed")
+    let ineligible = Data(#"{"five_hour":null,"cedar_ember":{"eligible":false,"ineligible_reason":"surface"}}"#.utf8)
+    try expect(BankedResetParser.claudeResetsStatus(ineligible) == "banked resets unavailable: surface", "ineligible reason is reported")
+    try expect(BankedResetParser.claude(ineligible) == nil, "no resets when ineligible")
+    let two = Data(#"{"cedar_ember":{"eligible":true,"grants":[{"id":"g1","label":"Limit reset","resets_total":2,"resets_left":2,"ends_at":"2026-12-01T00:00:00Z","paused":false,"usable_now":true,"clears":["five_hour"]}]}}"#.utf8)
+    try expect(BankedResetParser.claudeResetsStatus(two) == "banked resets: 2", "count reported")
+    try expect(BankedResetParser.claude(two)?.count == 2, "two resets parsed")
+    try expect(BankedResetParser.claudeResetsStatus(Data("{}".utf8)) == nil, "no block, nothing to say")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("Claude identity and banked-resets status", testClaudeIdentityAndResetsStatus),
     ("golden hour late anchor and slept-through", testGoldenHourLateAnchorAndSleptThrough),
     ("CODEX_HOME resolution and keyring store", testCodexHomeResolution),
     ("plan cache is per credential", testPlanCacheIsPerCredential),

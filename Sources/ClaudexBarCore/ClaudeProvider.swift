@@ -12,6 +12,8 @@ public struct ClaudeProvider: UsageProvider {
     private let refreshURL: URL
     private let now: @Sendable () -> Date
     private let persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)?
+    private let diagnostics: (@Sendable (String) -> Void)?
+    private let resetsStatus = ResetsStatusMemo()
 
     public init(
         credentialReader: any ClaudeCredentialReading = ClaudeCredentialReader(),
@@ -20,8 +22,10 @@ public struct ClaudeProvider: UsageProvider {
         usageURL: URL = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")!,
         refreshURL: URL = URL(string: "https://platform.claude.com/v1/oauth/token")!,
         now: @escaping @Sendable () -> Date = { Date() },
-        persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)? = nil
+        persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)? = nil,
+        diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
+        self.diagnostics = diagnostics
         self.credentialReader = credentialReader
         self.httpClient = httpClient
         self.usageURL = usageURL
@@ -120,6 +124,7 @@ public struct ClaudeProvider: UsageProvider {
         let key = PlanCache.tag(stripBearerPrefix(accessToken))
         if let cached = planCache.fresh(key: key) { return cached }
         var request = URLRequest(url: profileURL)
+        request.setValue(ClaudeCodeIdentity.userAgent(), forHTTPHeaderField: "User-Agent")
         request.setValue("Bearer \(stripBearerPrefix(accessToken))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -140,6 +145,7 @@ public struct ClaudeProvider: UsageProvider {
 
     private func fetchUsage(accessToken: String, refreshToken: String?, allowRefresh: Bool = true) async throws -> Result<UsageSnapshot, UsageError> {
         var request = URLRequest(url: usageURL)
+        request.setValue(ClaudeCodeIdentity.userAgent(), forHTTPHeaderField: "User-Agent")
         request.setValue("Bearer \(stripBearerPrefix(accessToken))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -149,6 +155,9 @@ public struct ClaudeProvider: UsageProvider {
         let response = try await httpClient.data(for: request)
         switch response.statusCode {
         case 200..<300:
+            if let diagnostics, let line = resetsStatus.changed(BankedResetParser.claudeResetsStatus(response.data)) {
+                diagnostics(line)
+            }
             let snapshot = try Self.parseUsageResponse(response.data, fetchedAt: now())
                 .withResets(BankedResetParser.claude(response.data))
                 .withCredit(BankedResetParser.claudeIncludedCredit(response.data))
@@ -248,6 +257,21 @@ private struct ClaudeUsageResponse: Decodable {
         enum CodingKeys: String, CodingKey {
             case utilization
             case resetsAt = "resets_at"
+        }
+    }
+}
+
+/// Remembers the last banked-resets status so it's logged only on change.
+final class ResetsStatusMemo: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: String?
+
+    func changed(_ status: String?) -> String? {
+        guard let status else { return nil }
+        return lock.withLock {
+            guard status != last else { return nil }
+            last = status
+            return status
         }
     }
 }

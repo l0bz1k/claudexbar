@@ -92,6 +92,18 @@ actor CLIUpdateManager {
         }
     }
 
+    /// Claude's usage endpoint shows banked resets only to Claude Code, so
+    /// requests carry the installed Claude Code version (see ClaudeCodeIdentity).
+    static func refreshClaudeCodeIdentity() {
+        Task.detached {
+            // Wait for the login-shell PATH so a CLI from nvm etc. is found.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let executable = CLIExecutableLocator.executable(for: .claude),
+                  let version = await version(executable: executable) else { return }
+            ClaudeCodeIdentity.installedVersion = version
+        }
+    }
+
     private static func version(executable: URL) async -> String? {
         let result = await ProcessRunner.run(executable: executable, arguments: ["--version"], timeout: 30)
         guard result.succeeded else { return nil }

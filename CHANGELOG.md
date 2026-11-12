@@ -3,6 +3,16 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.5] — 2026-11-12
+
+### Fixed
+- **Claude's banked limit resets weren't shown.** Claude's usage endpoint
+  reports them ("2 resets") only to Claude Code itself; to anything else it
+  answers "not eligible: surface". ClaudexBar reads the same account with
+  Claude Code's sign-in, and now identifies as the installed Claude Code
+  version when asking. Whether resets are available, or why not, is written
+  to the log when it changes.
+
 ## [0.10.4] — 2026-11-08
 
 ### Fixed

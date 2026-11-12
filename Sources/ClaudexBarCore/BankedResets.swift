@@ -82,6 +82,16 @@ public enum BankedResetParser {
 
     /// Claude usage response with `?cedar_ember=1`: the `cedar_ember` block.
     /// Absent, null or `eligible: false` all mean "nothing to show".
+    /// One line for the log: "banked resets: 2" or "banked resets
+    /// unavailable: surface"; nil when the block is missing.
+    public static func claudeResetsStatus(_ usage: Data) -> String? {
+        guard let block = json(usage)?["cedar_ember"] as? [String: Any] else { return nil }
+        guard (block["eligible"] as? Bool) == true else {
+            return "banked resets unavailable: \(block["ineligible_reason"] as? String ?? "unknown")"
+        }
+        return "banked resets: \(claude(usage)?.count ?? 0)"
+    }
+
     public static func claude(_ usage: Data) -> BankedResets? {
         guard let block = json(usage)?["cedar_ember"] as? [String: Any],
               (block["eligible"] as? Bool) == true,

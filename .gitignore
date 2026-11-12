@@ -17,3 +17,6 @@ xcuserdata/
 dist/
 ClaudexBar.zip
 ClaudexBar.zip.sha256
+
+# Working files from AI-assisted sessions (reviews, release helpers)
+scratch/
