@@ -3,6 +3,16 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.6] — 2026-11-12
+
+### Fixed
+- **Rate limits: wait as long as the server asks.** When Claude's or
+  Codex's usage endpoint answers "too many requests" with a `Retry-After`,
+  ClaudexBar now waits that long (at most an hour, as Claude Code does)
+  instead of retrying on its own 2–10 minute schedule, which kept it rate
+  limited for over an hour at a time. The log says when the server's wait
+  is used. Without a `Retry-After`, the old backoff applies.
+
 ## [0.10.5] — 2026-11-12
 
 ### Fixed

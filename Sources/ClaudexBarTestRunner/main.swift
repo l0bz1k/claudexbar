@@ -2284,7 +2284,40 @@ func testClaudeIdentityAndResetsStatus() throws {
     try expect(BankedResetParser.claudeResetsStatus(Data("{}".utf8)) == nil, "no block, nothing to say")
 }
 
+
+// MARK: - v0.10.6: honour Retry-After
+
+private struct RateLimitedHTTPClient: HTTPClient {
+    let retryAfter: TimeInterval?
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        HTTPResponse(data: Data("{}".utf8), statusCode: 429, retryAfter: retryAfter)
+    }
+}
+
+func testRetryAfterIsParsedAndKept() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    try expect(RetryAfter.parse("120", now: now) == 120, "delay-seconds")
+    try expect(RetryAfter.parse(" 0 ", now: now) == 0, "zero allowed")
+    try expect(RetryAfter.parse(nil, now: now) == nil && RetryAfter.parse("soon", now: now) == nil && RetryAfter.parse("-5", now: now) == nil, "absent or junk -> nil")
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(identifier: "GMT")
+    formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+    let httpDate = formatter.string(from: now.addingTimeInterval(1800))
+    try expect(RetryAfter.parse(httpDate, now: now) == 1800, "HTTP date: \(httpDate) -> \(String(describing: RetryAfter.parse(httpDate, now: now)))")
+
+    let codex = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: RateLimitedHTTPClient(retryAfter: 900))
+    let result = runBlocking { await codex.fetchUsage() }
+    guard case .failure(.rateLimited) = result else { throw TestFailure(description: "429 -> rateLimited: \(result)") }
+    try expect(codex.rateLimitRetryAfter() == 900, "Codex keeps the server's Retry-After")
+    let silent = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: RateLimitedHTTPClient(retryAfter: nil))
+    _ = runBlocking { await silent.fetchUsage() }
+    try expect(silent.rateLimitRetryAfter() == nil, "no header, no hint")
+    try expect(OpenRouterProvider().rateLimitRetryAfter() == nil, "providers without it default to nil")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("Retry-After parsed and kept", testRetryAfterIsParsedAndKept),
     ("Claude identity and banked-resets status", testClaudeIdentityAndResetsStatus),
     ("golden hour late anchor and slept-through", testGoldenHourLateAnchorAndSleptThrough),
     ("CODEX_HOME resolution and keyring store", testCodexHomeResolution),

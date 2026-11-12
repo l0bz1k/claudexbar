@@ -72,6 +72,12 @@ public protocol UsageProvider: Sendable {
     var displayName: String { get }
     func fetchUsage() async -> Result<UsageSnapshot, UsageError>
     func reauthCommand() -> ShellCommand
+    /// How long the server asked to wait after its last 429, if it said.
+    func rateLimitRetryAfter() -> TimeInterval?
+}
+
+extension UsageProvider {
+    public func rateLimitRetryAfter() -> TimeInterval? { nil }
 }
 
 public struct UsageSnapshot: Equatable, Sendable {

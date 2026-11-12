@@ -14,6 +14,9 @@ public struct ClaudeProvider: UsageProvider {
     private let persistRefreshed: (@Sendable (ClaudeCredentials) -> Void)?
     private let diagnostics: (@Sendable (String) -> Void)?
     private let resetsStatus = ResetsStatusMemo()
+    private let retryAfter = RetryAfterMemo()
+
+    public func rateLimitRetryAfter() -> TimeInterval? { retryAfter.current }
 
     public init(
         credentialReader: any ClaudeCredentialReading = ClaudeCredentialReader(),
@@ -172,6 +175,7 @@ public struct ClaudeProvider: UsageProvider {
                 return .failure(.authExpired)
             }
         case 429:
+            retryAfter.set(response.retryAfter)
             return .failure(.rateLimited)
         default:
             return .failure(EdgeBlockDetector.blockError(statusCode: response.statusCode, body: response.data) ?? .server(statusCode: response.statusCode))

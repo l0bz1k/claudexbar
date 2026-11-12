@@ -294,9 +294,13 @@ final class StatusBarController: NSObject {
                     var message = error.sanitizedDescription
                     if case .rateLimited = error {
                         let strikes = (rateLimitBackoff[provider]?.strikes ?? 0) + 1
-                        let delay = min(10 * 60, settings.refreshInterval * pow(2, Double(strikes)))
+                        // The server's own Retry-After wins (capped at an hour,
+                        // as Claude Code does); else back off 2, 4, 8… 10 min.
+                        let asked = usageProvider.rateLimitRetryAfter()
+                        let delay = asked.map { min(3600, max(settings.refreshInterval, $0)) }
+                            ?? min(10 * 60, settings.refreshInterval * pow(2, Double(strikes)))
                         rateLimitBackoff[provider] = (Date().addingTimeInterval(delay), strikes)
-                        message += " — next try in \(Int(delay / 60)) min"
+                        message += " — next try in \(Int((delay / 60).rounded(.up))) min\(asked != nil ? " (server's Retry-After)" : "")"
                     }
                     if lastLoggedError[provider] != message || error == .rateLimited {
                         lastLoggedError[provider] = message

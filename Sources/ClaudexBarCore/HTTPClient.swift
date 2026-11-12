@@ -3,11 +3,39 @@ import Foundation
 public struct HTTPResponse: Sendable {
     public let data: Data
     public let statusCode: Int
+    /// The server's `Retry-After`, in seconds from now, when it sent one.
+    public let retryAfter: TimeInterval?
 
-    public init(data: Data, statusCode: Int) {
+    public init(data: Data, statusCode: Int, retryAfter: TimeInterval? = nil) {
         self.data = data
         self.statusCode = statusCode
+        self.retryAfter = retryAfter
     }
+}
+
+public enum RetryAfter {
+    /// `Retry-After` is either delay-seconds ("120") or an HTTP date.
+    public static func parse(_ value: String?, now: Date = Date()) -> TimeInterval? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
+        if let seconds = TimeInterval(value) { return seconds >= 0 ? seconds : nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = formatter.date(from: value) else { return nil }
+        return max(0, date.timeIntervalSince(now))
+    }
+}
+
+/// The last 429's `Retry-After`, kept by a provider for the app to read.
+public final class RetryAfterMemo: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: TimeInterval?
+
+    public init() {}
+
+    public func set(_ value: TimeInterval?) { lock.withLock { self.value = value } }
+    public var current: TimeInterval? { lock.withLock { value } }
 }
 
 public protocol HTTPClient: Sendable {
@@ -44,6 +72,7 @@ public struct URLSessionHTTPClient: HTTPClient {
         guard let http = response as? HTTPURLResponse else {
             throw UsageError.network
         }
-        return HTTPResponse(data: data, statusCode: http.statusCode)
+        return HTTPResponse(data: data, statusCode: http.statusCode,
+                            retryAfter: RetryAfter.parse(http.value(forHTTPHeaderField: "Retry-After")))
     }
 }

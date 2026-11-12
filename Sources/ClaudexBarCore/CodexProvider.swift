@@ -9,6 +9,9 @@ public struct CodexProvider: UsageProvider {
     private let usageURL: URL
     private let resetCreditsURL: URL
     private let resetCache = ResetDetailCache()
+    private let retryAfter = RetryAfterMemo()
+
+    public func rateLimitRetryAfter() -> TimeInterval? { retryAfter.current }
 
     public init(
         authReader: any CodexAuthReading = CodexAuthReader(),
@@ -47,6 +50,7 @@ public struct CodexProvider: UsageProvider {
             case 401:
                 return .failure(.authExpired)
             case 429:
+                retryAfter.set(response.retryAfter)
                 return .failure(.rateLimited)
             default:
                 return .failure(EdgeBlockDetector.blockError(statusCode: response.statusCode, body: response.data) ?? .server(statusCode: response.statusCode))
