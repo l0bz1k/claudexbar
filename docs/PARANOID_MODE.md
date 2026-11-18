@@ -58,7 +58,7 @@ they send the requests they guard.
 - **While requests are on hold:** the blocking answer stands for up to 5
   minutes, so a long outage doesn't burn through a GeoIP quota.
 - **At once** on a network change (VPN up/down, Wi-Fi switch, interface
-  change), a settings change, or **Check Exit IP Now**.
+  change), a settings change, or **Check Exit IP Now…**.
 
 If your VPN app switches to another node without the Mac seeing a network
 change, the switch can take up to 5 minutes to be noticed — use **Check Exit
@@ -88,8 +88,9 @@ A free **IPinfo Lite** token has no daily or monthly cap for country lookups.
    your **access token** (a short string of letters and digits).
 3. In ClaudexBar: **Paranoid Mode → Set IPinfo Token…**, paste it, **Save**.
 
-The menu then shows **IPinfo token: set — no daily limit**, and the check
-runs right away.
+The menu then shows **IPinfo token: set — no daily limit**, and a check
+runs right away; its dialog shows `ipinfo.io (Lite token): NL — Netherlands`
+when the token works.
 
 ### How the token is handled
 
@@ -109,7 +110,14 @@ another program makes macOS ask for permission, again after every update.
 
 ## Reading the status
 
-**Paranoid Mode** submenu, second line:
+**Check Exit IP Now…** asks both services right away and opens a dialog
+with the answer: each service's country (or why it failed), your allowed
+countries, and whether Claude/Codex requests are sent or on hold. It works
+with Paranoid Mode off too — handy to see what it would decide before you
+turn it on. With the mode on, a successful check also lets a held-back
+Claude/Codex poll go out at once.
+
+The same result stays in the **Paranoid Mode** submenu, second line:
 
 | Shown | Meaning |
 |---|---|
@@ -150,7 +158,7 @@ leave the same way. It is **not** protection against:
 ## Troubleshooting
 
 - **Always `geo`, status says a country you didn't expect** — check which
-  node your VPN is on, then **Check Exit IP Now**.
+  node your VPN is on, then **Check Exit IP Now…**.
 - **"sources disagree"** — your VPN sends some traffic another way; check
   its split-tunnel / per-app settings.
 - **"daily limit reached"** — set an IPinfo token (above).

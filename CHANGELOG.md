@@ -3,6 +3,18 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Paste didn't work in ClaudexBar's dialogs.** ⌘V (and ⌘C, ⌘X, ⌘A, ⌘Z)
+  did nothing in the IPinfo token, country code and Claude sign-in fields —
+  only right-click → Paste worked. A menu-bar app has no Edit menu for the
+  shortcuts to go to; ClaudexBar now installs a hidden one.
+- **"Check Exit IP Now" showed nothing.** It now opens a dialog with each
+  GeoIP service's answer, the allowed countries and whether Claude/Codex
+  requests are sent or on hold — and works with Paranoid Mode off too. With
+  the mode on, a passing check lets a held-back poll go out at once.
+
 ## [0.11.0] — 2026-11-18
 
 ### Added

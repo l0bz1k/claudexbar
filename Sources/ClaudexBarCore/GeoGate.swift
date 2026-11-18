@@ -307,6 +307,18 @@ public actor GeoGate {
         return .checked(check)
     }
 
+    /// A fresh lookup on demand ("Check Exit IP Now"), whether or not the
+    /// mode is on, judged against `allowedCountries`. With the mode on, it
+    /// also becomes the answer the next requests use.
+    public func probe(allowedCountries: Set<String>) async -> GeoCheck {
+        invalidate()
+        let allowed = ParanoidConfiguration(allowedCountries: allowedCountries).allowedCountries
+        let observations = await currentObservations(allowed: allowed)
+        let check = GeoCheck(observations: observations, allowedCountries: allowed, checkedAt: now())
+        if configuration() != nil { latest = check }
+        return check
+    }
+
     /// Forget the cached answer (network changed, user asked to re-check).
     public func invalidate() {
         generation += 1
