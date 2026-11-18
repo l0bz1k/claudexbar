@@ -40,7 +40,7 @@ public enum CountryCode {
     /// Codes macOS knows as regions, for validating user input.
     public static func isKnownRegion(_ code: String) -> Bool {
         guard let code = normalize(code) else { return false }
-        return Locale.isoRegionCodes.contains(code)
+        return Locale.Region.isoRegions.contains { $0.identifier == code }
     }
 
     public static func displayName(_ code: String, locale: Locale = Locale(identifier: "en_US")) -> String {

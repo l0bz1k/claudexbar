@@ -18,6 +18,13 @@ All notable changes to ClaudexBar are documented here. This project follows
   tray dims the last reading after 5 held-back polls in a row. Presets NL,
   DE, LV, FR, GB, FI, NO, DK, PL, ES, IT, US, plus any ISO code.
   OpenRouter and OpenCode are not affected.
+- **Paranoid Mode: IPinfo Lite token.** The public `ipinfo.io` endpoint
+  allows 1,000 checks a day per IP (shared behind a VPN exit) — less than a
+  1-minute refresh needs. With a free IPinfo Lite token (Keychain, sent only
+  in the Authorization header) checks use `api.ipinfo.io/lite/me`, uncapped.
+  A GeoIP limit that runs out is named in the menu and tooltip, logged and
+  notified once a day; requests stay on hold. While on hold, countries are
+  re-checked at most every 5 minutes, at once on a network change.
 
 ## [0.10.6] — 2026-11-12
 
