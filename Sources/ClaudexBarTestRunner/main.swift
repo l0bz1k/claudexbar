@@ -2478,7 +2478,70 @@ func testGeoBlockedErrorIsTransientWithGeoLabel() throws {
     try expect(error.sanitizedDescription == "Blocked by Paranoid Mode: exit IP in DE", error.sanitizedDescription)
 }
 
+private final class Clock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+    init(_ value: Date) { self.value = value }
+    var now: Date { lock.withLock { value } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { value = value.addingTimeInterval(seconds) } }
+}
+
+func testIPInfoUsesLiteWithTokenInHeaderOnly() throws {
+    let anonymous = IPInfoGeoSource().makeRequest(timeout: 5)
+    try expect(anonymous.url == IPInfoGeoSource.publicURL && anonymous.value(forHTTPHeaderField: "Authorization") == nil, "no token: public endpoint")
+    let lite = IPInfoGeoSource(token: { " abc123 " }).makeRequest(timeout: 5)
+    try expect(lite.url == IPInfoGeoSource.liteURL, "token: Lite endpoint")
+    try expect(lite.value(forHTTPHeaderField: "Authorization") == "Bearer abc123", "token in the header, trimmed")
+    try expect(lite.url?.query == nil && !(lite.url?.absoluteString.contains("abc123") ?? true), "token never in the URL")
+    let json = Data(#"{"ip":"203.0.113.7","asn":"AS1","as_name":"x","as_domain":"x.nl","country_code":"NL","country":"Netherlands","continent_code":"EU","continent":"Europe"}"#.utf8)
+    try expect(IPInfoGeoSource().parseCountry(json) == "NL", "Lite JSON country_code")
+    try expect(IPInfoGeoSource().parseCountry(Data(#"{"error":{"title":"Unknown token"}}"#.utf8)) == nil, "error JSON")
+}
+
+func testGeoQuotaAndTokenFailuresAreNamed() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "ipinfo.io": (429, "You've hit the daily limit")])
+    let anonymous = makeGate(geo, allowed: ["NL"])
+    let check = try expectNonNil(runBlocking { await anonymous.verify() }.check, "checked")
+    try expect(!check.permitsRequests, "quota exhausted blocks (fail-closed)")
+    try expect(check.quotaExhaustedSources == ["ipinfo.io"], "quota source named: \(check.quotaExhaustedSources)")
+    try expect(check.summary.contains("ipinfo.io: daily limit reached"), check.summary)
+
+    let geoLite = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "api.ipinfo.io": (403, #"{"error":"bad"}"#)])
+    let withToken = GeoGate(configuration: { ParanoidConfiguration(allowedCountries: ["NL"]) },
+                            sources: GeoGate.defaultSources(ipinfoToken: { "bad-token" }), httpClient: geoLite)
+    let rejected = try expectNonNil(runBlocking { await withToken.verify() }.check, "checked")
+    try expect(!rejected.permitsRequests && rejected.quotaExhaustedSources.isEmpty, "a rejected token is not a quota")
+    try expect(rejected.summary.contains("token rejected (HTTP 403)"), rejected.summary)
+    try expect(geoLite.count("ipinfo.io") == 0 && geoLite.count("api.ipinfo.io") == 1, "with a token only the Lite endpoint is used")
+}
+
+func testBlockedVerdictIsNotRecheckedEveryPoll() throws {
+    let clock = Clock(Date(timeIntervalSince1970: 1_800_000_000))
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, "DE")])
+    let gate = GeoGate(configuration: { ParanoidConfiguration(allowedCountries: ["NL"]) }, httpClient: geo,
+                       cacheTTL: 20, blockedRecheckInterval: 300, now: { clock.now })
+    try expect(!runBlocking { await gate.verify() }.permitsRequests, "DE blocks")
+    for _ in 0..<4 {
+        clock.advance(60) // one-minute polls
+        try expect(!runBlocking { await gate.verify() }.permitsRequests, "still blocked")
+    }
+    try expect(geo.count("ipinfo.io") == 1, "no new lookups while held back: \(geo.count("ipinfo.io"))")
+    clock.advance(61)
+    _ = runBlocking { await gate.verify() }
+    try expect(geo.count("ipinfo.io") == 2, "asked again after 5 min")
+
+    geo.set("1.1.1.1", trace("NL")); geo.set("ipinfo.io", (200, "NL"))
+    runBlocking { await gate.invalidate() } // network change
+    try expect(runBlocking { await gate.verify() }.permitsRequests, "a network change re-checks at once")
+    clock.advance(30)
+    try expect(runBlocking { await gate.verify() }.permitsRequests, "allowed")
+    try expect(geo.count("ipinfo.io") == 4, "allowed answers are re-checked each poll (20 s cache)")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("IPinfo Lite with token in header only", testIPInfoUsesLiteWithTokenInHeaderOnly),
+    ("GeoIP quota and token failures named", testGeoQuotaAndTokenFailuresAreNamed),
+    ("blocked verdict not re-checked every poll", testBlockedVerdictIsNotRecheckedEveryPoll),
     ("country code normalization", testCountryCodeNormalization),
     ("GeoIP sources parse answers", testGeoSourcesParseTheirAnswers),
     ("geo check needs every answer allowed", testGeoCheckNeedsEveryAllowedAnswer),

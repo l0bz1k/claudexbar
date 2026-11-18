@@ -1,4 +1,5 @@
 import Foundation
+import Security
 #if canImport(Network)
 import Network
 #endif
@@ -54,11 +55,14 @@ public struct GeoObservation: Equatable, Sendable {
     public let country: String?
     /// Why the lookup failed (no secrets: a status code or error kind).
     public let failure: String?
+    /// The service refused because a request quota ran out (HTTP 429).
+    public let quotaExhausted: Bool
 
-    public init(source: String, country: String?, failure: String? = nil) {
+    public init(source: String, country: String?, failure: String? = nil, quotaExhausted: Bool = false) {
         self.source = source
         self.country = country
         self.failure = failure
+        self.quotaExhausted = quotaExhausted
     }
 }
 
@@ -79,6 +83,11 @@ public struct GeoCheck: Equatable, Sendable {
         !observations.isEmpty && observations.allSatisfy { observation in
             observation.country.map(allowedCountries.contains) ?? false
         }
+    }
+
+    /// Sources whose request quota ran out.
+    public var quotaExhaustedSources: [String] {
+        observations.filter(\.quotaExhausted).map(\.source)
     }
 
     /// Distinct countries seen, in source order.
@@ -127,17 +136,32 @@ public enum GeoVerdict: Equatable, Sendable {
 
 public protocol GeoIPSource: Sendable {
     var name: String { get }
-    var url: URL { get }
+    func makeRequest(timeout: TimeInterval) -> URLRequest
     /// The ISO country code in a successful response body, or nil.
     func parseCountry(_ body: Data) -> String?
+    /// What a non-2xx answer means, in words for the menu and the log.
+    func describeFailure(statusCode: Int, authenticated: Bool) -> (detail: String, quotaExhausted: Bool)
+}
+
+extension GeoIPSource {
+    public func describeFailure(statusCode: Int, authenticated: Bool) -> (detail: String, quotaExhausted: Bool) {
+        statusCode == 429 ? ("rate limited (HTTP 429)", true) : ("HTTP \(statusCode)", false)
+    }
 }
 
 /// `https://1.1.1.1/cdn-cgi/trace`: plain `key=value` lines, `loc=NL`.
 public struct CloudflareTraceGeoSource: GeoIPSource {
     public let name = "1.1.1.1"
-    public let url = URL(string: "https://1.1.1.1/cdn-cgi/trace")!
+    public static let url = URL(string: "https://1.1.1.1/cdn-cgi/trace")!
 
     public init() {}
+
+    public func makeRequest(timeout: TimeInterval) -> URLRequest {
+        var request = URLRequest(url: Self.url)
+        request.timeoutInterval = timeout
+        request.setValue("text/plain", forHTTPHeaderField: "Accept")
+        return request
+    }
 
     public func parseCountry(_ body: Data) -> String? {
         guard let text = String(data: body, encoding: .utf8) else { return nil }
@@ -148,27 +172,70 @@ public struct CloudflareTraceGeoSource: GeoIPSource {
     }
 }
 
-/// `https://ipinfo.io/country`: the bare code, `NL\n`.
+/// ipinfo.io. With a (free) IPinfo Lite token: `api.ipinfo.io/lite/me`,
+/// no request cap. Without one: the public `ipinfo.io/country`, limited to
+/// 1,000 requests a day per IP — shared by everyone behind the same VPN exit.
+/// The token goes in the Authorization header, never in the URL.
 public struct IPInfoGeoSource: GeoIPSource {
     public let name = "ipinfo.io"
-    public let url = URL(string: "https://ipinfo.io/country")!
+    public static let publicURL = URL(string: "https://ipinfo.io/country")!
+    public static let liteURL = URL(string: "https://api.ipinfo.io/lite/me")!
 
-    public init() {}
+    private let token: @Sendable () -> String?
 
+    public init(token: @escaping @Sendable () -> String? = { nil }) {
+        self.token = token
+    }
+
+    public func makeRequest(timeout: TimeInterval) -> URLRequest {
+        let token = self.token()?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var request: URLRequest
+        if let token, !token.isEmpty {
+            request = URLRequest(url: Self.liteURL)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+        } else {
+            request = URLRequest(url: Self.publicURL)
+            request.setValue("text/plain", forHTTPHeaderField: "Accept")
+        }
+        request.timeoutInterval = timeout
+        return request
+    }
+
+    /// Lite answers JSON (`country_code`), the public endpoint a bare code.
     public func parseCountry(_ body: Data) -> String? {
-        CountryCode.normalize(String(data: body, encoding: .utf8))
+        if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+            return CountryCode.normalize(object["country_code"] as? String)
+        }
+        return CountryCode.normalize(String(data: body, encoding: .utf8))
+    }
+
+    public func describeFailure(statusCode: Int, authenticated: Bool) -> (detail: String, quotaExhausted: Bool) {
+        switch (statusCode, authenticated) {
+        case (429, false):
+            return ("daily limit reached — 1,000/day without a token, shared by everyone on this IP", true)
+        case (429, true):
+            return ("rate limited (HTTP 429)", true)
+        case (401, true), (403, true):
+            return ("token rejected (HTTP \(statusCode))", false)
+        default:
+            return ("HTTP \(statusCode)", false)
+        }
     }
 }
 
 // MARK: - Gate
 
 public actor GeoGate {
-    public static let defaultSources: [any GeoIPSource] = [CloudflareTraceGeoSource(), IPInfoGeoSource()]
+    public static func defaultSources(ipinfoToken: @escaping @Sendable () -> String? = { nil }) -> [any GeoIPSource] {
+        [CloudflareTraceGeoSource(), IPInfoGeoSource(token: ipinfoToken)]
+    }
 
     private let configuration: @Sendable () -> ParanoidConfiguration?
     private let sources: [any GeoIPSource]
     private let httpClient: any HTTPClient
     private let cacheTTL: TimeInterval
+    private let blockedRecheckInterval: TimeInterval
     private let timeout: TimeInterval
     private let now: @Sendable () -> Date
 
@@ -186,11 +253,16 @@ public actor GeoGate {
     ///     Short on purpose: it only folds the few calls of one poll (usage,
     ///     profile, token refresh; Claude and Codex polled together) into one
     ///     check, and a network change discards it at once.
+    ///   - blockedRecheckInterval: while requests are held back, how long a
+    ///     blocking answer stands before the services are asked again. Polls
+    ///     in between stay blocked without spending GeoIP quota; a network
+    ///     change, a settings change or "Check Exit IP Now" asks at once.
     public init(
         configuration: @escaping @Sendable () -> ParanoidConfiguration?,
-        sources: [any GeoIPSource] = GeoGate.defaultSources,
+        sources: [any GeoIPSource] = GeoGate.defaultSources(),
         httpClient: any HTTPClient = URLSessionHTTPClient(),
         cacheTTL: TimeInterval = 20,
+        blockedRecheckInterval: TimeInterval = 5 * 60,
         timeout: TimeInterval = 6,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -198,6 +270,7 @@ public actor GeoGate {
         self.sources = sources
         self.httpClient = httpClient
         self.cacheTTL = cacheTTL
+        self.blockedRecheckInterval = blockedRecheckInterval
         self.timeout = timeout
         self.now = now
     }
@@ -218,7 +291,7 @@ public actor GeoGate {
         // again, but not forever — a network that keeps flapping blocks.
         for _ in 0..<3 {
             let generationAtStart = generation
-            let observations = await currentObservations()
+            let observations = await currentObservations(allowed: config.allowedCountries)
             if generationAtStart == generation {
                 let check = GeoCheck(observations: observations, allowedCountries: config.allowedCountries, checkedAt: cached?.at ?? now())
                 latest = check
@@ -256,9 +329,12 @@ public actor GeoGate {
         #endif
     }
 
-    private func currentObservations() async -> [GeoObservation] {
-        if let cached, cached.generation == generation, now().timeIntervalSince(cached.at) < cacheTTL {
-            return cached.observations
+    private func currentObservations(allowed: Set<String>) async -> [GeoObservation] {
+        if let cached, cached.generation == generation {
+            let permits = GeoCheck(observations: cached.observations, allowedCountries: allowed, checkedAt: cached.at).permitsRequests
+            if now().timeIntervalSince(cached.at) < (permits ? cacheTTL : blockedRecheckInterval) {
+                return cached.observations
+            }
         }
         if let inFlight, inFlight.generation == generation {
             return await inFlight.task.value
@@ -292,13 +368,13 @@ public actor GeoGate {
     }
 
     static func lookUp(source: any GeoIPSource, httpClient: any HTTPClient, timeout: TimeInterval) async -> GeoObservation {
-        var request = URLRequest(url: source.url)
-        request.timeoutInterval = timeout
-        request.setValue("text/plain", forHTTPHeaderField: "Accept")
+        let request = source.makeRequest(timeout: timeout)
+        let authenticated = request.value(forHTTPHeaderField: "Authorization") != nil
         do {
             let response = try await httpClient.data(for: request)
             guard (200..<300).contains(response.statusCode) else {
-                return GeoObservation(source: source.name, country: nil, failure: "HTTP \(response.statusCode)")
+                let failure = source.describeFailure(statusCode: response.statusCode, authenticated: authenticated)
+                return GeoObservation(source: source.name, country: nil, failure: failure.detail, quotaExhausted: failure.quotaExhausted)
             }
             guard let country = source.parseCountry(response.data) else {
                 return GeoObservation(source: source.name, country: nil, failure: "unreadable answer")
@@ -332,5 +408,57 @@ public struct GeoGatedHTTPClient: HTTPClient {
             throw UsageError.geoBlocked(check.summary)
         }
         return try await base.data(for: request)
+    }
+}
+
+// MARK: - IPinfo token
+
+/// The IPinfo Lite token, in the login Keychain (written by ClaudexBar, so
+/// reading it never prompts). Never logged, never put in a URL.
+public struct IPInfoTokenStore: Sendable {
+    public static let service = "ClaudexBar-IPinfo-Token"
+    private let account = "default"
+
+    public init() {}
+
+    public func save(_ token: String) throws {
+        let data = Data(token.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account
+        ]
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecSuccess { return }
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw UsageError.keychain }
+            return
+        }
+        throw UsageError.keychain
+    }
+
+    public func load() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        KeychainDiagnostics.noteReadStatus(status, service: Self.service)
+        guard status == errSecSuccess, let data = item as? Data,
+              let token = String(data: data, encoding: .utf8), !token.isEmpty else { return nil }
+        return token
+    }
+
+    public func clear() {
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service
+        ] as CFDictionary)
     }
 }
