@@ -3,28 +3,34 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.0] — 2026-11-18
 
 ### Added
-- **Paranoid Mode** (opt-in, off by default): Claude and Codex requests
-  are sent only while the exit IP is in an allowed country (default:
-  Netherlands). Before every request — usage, profile, token refresh, the
-  sign-in code exchange, re-auth and the auto-start anchor — the country is
-  looked up with two GeoIP services (`1.1.1.1/cdn-cgi/trace`,
-  `ipinfo.io/country`); both must report an allowed country, and a failed
-  lookup blocks. A held-back request is never sent, so a refresh token isn't
-  spent and a login isn't reported as expired. One lookup covers a poll
-  (20 s), dropped on any network change. The menu shows `geo` at once; the
-  tray dims the last reading after 5 held-back polls in a row. Presets NL,
-  DE, LV, FR, GB, FI, NO, DK, PL, ES, IT, US, plus any ISO code.
-  OpenRouter and OpenCode are not affected.
-- **Paranoid Mode: IPinfo Lite token.** The public `ipinfo.io` endpoint
-  allows 1,000 checks a day per IP (shared behind a VPN exit) — less than a
-  1-minute refresh needs. With a free IPinfo Lite token (Keychain, sent only
-  in the Authorization header) checks use `api.ipinfo.io/lite/me`, uncapped.
-  A GeoIP limit that runs out is named in the menu and tooltip, logged and
-  notified once a day; requests stay on hold. While on hold, countries are
-  re-checked at most every 5 minutes, at once on a network change.
+- **Paranoid Mode** (opt-in, off by default) — Claude and Codex requests are
+  sent only while the Mac's exit IP is in a country you allow (default:
+  Netherlands). Meant for VPN/proxy users who must never reach these
+  services from another location. Guide: [docs/PARANOID_MODE.md](docs/PARANOID_MODE.md).
+  - Before every Claude/Codex request — usage, plan, token refresh, the
+    in-app sign-in, `codex login`, the auto-start anchor — the country is
+    looked up with two independent GeoIP services (`1.1.1.1/cdn-cgi/trace`
+    and IPinfo). Both must report an allowed country; a different country,
+    a disagreement, a timeout, an error or a used-up quota blocks
+    (fail-closed). A held-back request is never sent: a refresh token isn't
+    spent and a login isn't marked expired.
+  - Allowed countries: NL, DE, LV, FR, GB, FI, NO, DK, PL, ES, IT, US, or
+    any ISO 3166-1 code via **Add Country Code…**.
+  - A held-back provider shows `geo` in the menu; the tray keeps its last
+    figures and dims them after 5 held-back polls in a row.
+  - **IPinfo Lite token**: the public `ipinfo.io` endpoint allows 1,000
+    checks a day per IP, shared by everyone behind the same VPN exit — less
+    than a 1-minute refresh needs. With a free token (Keychain; sent only in
+    the Authorization header to `api.ipinfo.io`) there's no daily cap.
+  - A GeoIP quota that runs out is named in the menu and tooltip, logged,
+    and notified once a day; requests stay on hold.
+  - One check covers a polling round (20 s cache); while on hold, countries
+    are re-checked at most every 5 minutes; any network change re-checks at
+    once. **Check Exit IP Now** shows what the services see.
+  - OpenRouter and OpenCode are not affected.
 
 ## [0.10.6] — 2026-11-12
 

@@ -63,7 +63,7 @@ The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/s
 - If you're already working at the anchor time, you get one notification that today's golden hour isn't reachable, and the regular schedule continues until tomorrow.
 - Tip: choose a time on a 10-minute mark (14:00, 14:10) — Claude rounds a window's start to 10 minutes.
 
-**Paranoid Mode** (opt-in)
+**Paranoid Mode** (opt-in) — for VPN/proxy users who must never reach Claude or Codex from the wrong country. Full guide, including how to get the free IPinfo token: **[docs/PARANOID_MODE.md](docs/PARANOID_MODE.md)**.
 - Claude and Codex requests leave the Mac only from the countries you allow (default: Netherlands). Before every request — usage, token refresh, sign-in, the auto-start anchor — ClaudexBar looks up its exit IP's country with two independent GeoIP services (`1.1.1.1/cdn-cgi/trace` and `ipinfo.io/country`); nothing is sent unless **both** report an allowed country. A lookup that fails or times out also blocks (fail-closed).
 - One lookup covers the few calls of a poll (cached 20 s) and is discarded the moment the network changes (VPN up/down, Wi-Fi switch).
 - **GeoIP limits.** Without a token, `ipinfo.io` allows 1,000 checks a day per IP — shared by everyone behind the same VPN exit, and a 1-minute refresh alone needs ~1,440. Add a free **IPinfo Lite** token (ipinfo.io → Dashboard → Lite) under **Paranoid Mode → Set IPinfo Token…**: checks then go to `api.ipinfo.io/lite/me` with no daily cap. The token is kept in the Keychain and sent only in the Authorization header. If a service's limit runs out anyway, requests stay on hold, the menu and tooltip say which service hit its limit, and you get one notification a day.
@@ -172,6 +172,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 ## Documentation
 
 - [docs/AUTH.md](docs/AUTH.md) — how Codex and Claude Code authentication work, and why.
+- [docs/PARANOID_MODE.md](docs/PARANOID_MODE.md) — Paranoid Mode: what it checks, getting an IPinfo token, reading its status, its limits.
 - [SECURITY.md](SECURITY.md) — security model and how to report a vulnerability.
 - [CHANGELOG.md](CHANGELOG.md) — release notes.
 
