@@ -2316,7 +2316,177 @@ func testRetryAfterIsParsedAndKept() throws {
     try expect(OpenRouterProvider().rateLimitRetryAfter() == nil, "providers without it default to nil")
 }
 
+
+// MARK: - v0.11.0: Paranoid Mode
+
+/// Canned GeoIP answers by host; counts lookups per host.
+private final class GeoStubHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [String: (status: Int, body: String)?]
+    private(set) var calls: [String: Int] = [:]
+
+    init(_ answers: [String: (status: Int, body: String)?]) { self.answers = answers }
+
+    func set(_ host: String, _ answer: (status: Int, body: String)?) { lock.withLock { answers[host] = answer } }
+    func count(_ host: String) -> Int { lock.withLock { calls[host] ?? 0 } }
+
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        let host = request.url?.host ?? ""
+        let answer: (status: Int, body: String)?? = lock.withLock {
+            calls[host, default: 0] += 1
+            return answers[host]
+        }
+        guard let configured = answer, let reply = configured else { throw URLError(.cannotConnectToHost) }
+        return HTTPResponse(data: Data(reply.body.utf8), statusCode: reply.status)
+    }
+}
+
+/// Records every request; must never be reached when the gate blocks.
+private final class CountingHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var requestCount: Int { lock.withLock { count } }
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        lock.withLock { count += 1 }
+        return HTTPResponse(data: Data("{}".utf8), statusCode: 200)
+    }
+}
+
+private func trace(_ loc: String) -> (status: Int, body: String) {
+    (200, "fl=123\nh=1.1.1.1\nip=203.0.113.7\nts=1.0\nvisit_scheme=https\nloc=\(loc)\ntls=TLSv1.3\n")
+}
+
+private func makeGate(_ geo: GeoStubHTTPClient, allowed: Set<String>?) -> GeoGate {
+    GeoGate(configuration: { allowed.map { ParanoidConfiguration(allowedCountries: $0) } }, httpClient: geo, cacheTTL: 60)
+}
+
+func testCountryCodeNormalization() throws {
+    try expect(CountryCode.normalize(" nl\n") == "NL", "trimmed and uppercased")
+    try expect(CountryCode.normalize("XX") == nil, "Cloudflare unknown is not a country")
+    try expect(CountryCode.normalize("T1") == nil, "Tor marker is not a country")
+    try expect(CountryCode.normalize("NLD") == nil && CountryCode.normalize("") == nil && CountryCode.normalize(nil) == nil, "only alpha-2")
+    try expect(CountryCode.normalize("<html>") == nil, "junk rejected")
+    try expect(CountryCode.isKnownRegion("lv") && !CountryCode.isKnownRegion("QQ"), "known regions only")
+    try expect(ParanoidConfiguration(allowedCountries: ["nl", "de", "bogus"]).allowedCountries == ["NL", "DE"], "configuration normalizes")
+}
+
+func testGeoSourcesParseTheirAnswers() throws {
+    try expect(CloudflareTraceGeoSource().parseCountry(Data(trace("NL").body.utf8)) == "NL", "trace loc=")
+    try expect(CloudflareTraceGeoSource().parseCountry(Data("ip=1.2.3.4\n".utf8)) == nil, "no loc line")
+    try expect(CloudflareTraceGeoSource().parseCountry(Data(trace("XX").body.utf8)) == nil, "unknown loc")
+    try expect(IPInfoGeoSource().parseCountry(Data("NL\n".utf8)) == "NL", "ipinfo bare code")
+    try expect(IPInfoGeoSource().parseCountry(Data(#"{"error":"rate limit"}"#.utf8)) == nil, "ipinfo error body")
+}
+
+func testGeoCheckNeedsEveryAllowedAnswer() throws {
+    let at = Date(timeIntervalSince1970: 1_800_000_000)
+    func check(_ a: String?, _ b: String?, allowed: Set<String> = ["NL"]) -> GeoCheck {
+        GeoCheck(observations: [
+            GeoObservation(source: "1.1.1.1", country: a, failure: a == nil ? "timed out" : nil),
+            GeoObservation(source: "ipinfo.io", country: b, failure: b == nil ? "HTTP 429" : nil)
+        ], allowedCountries: allowed, checkedAt: at)
+    }
+    try expect(check("NL", "NL").permitsRequests, "both NL")
+    try expect(check("NL", "NL").summary == "exit IP in NL", check("NL", "NL").summary)
+    try expect(!check("DE", "DE").permitsRequests && check("DE", "DE").summary == "exit IP in DE", "both DE")
+    try expect(!check("NL", "DE").permitsRequests, "disagreement blocks")
+    try expect(check("NL", "DE").summary == "GeoIP sources disagree (NL / DE)", check("NL", "DE").summary)
+    try expect(check("NL", "DE", allowed: ["NL", "DE"]).permitsRequests, "two allowed countries both pass")
+    try expect(!check("NL", nil).permitsRequests, "a failed source blocks (fail-closed)")
+    try expect(check("NL", nil).summary == "GeoIP lookup failed (ipinfo.io: HTTP 429)", check("NL", nil).summary)
+    try expect(!GeoCheck(observations: [], allowedCountries: ["NL"], checkedAt: at).permitsRequests, "no observations blocks")
+}
+
+func testGeoGateOffSendsNothing() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, "DE")])
+    let gate = makeGate(geo, allowed: nil)
+    let verdict = runBlocking { await gate.verify() }
+    try expect(verdict == .disabled && verdict.permitsRequests, "off: pass-through")
+    try expect(geo.count("1.1.1.1") == 0 && geo.count("ipinfo.io") == 0, "off: no GeoIP lookups either")
+}
+
+func testGeoGateBlocksAndAllows() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "ipinfo.io": (200, "NL\n")])
+    let gate = makeGate(geo, allowed: ["NL"])
+    try expect(runBlocking { await gate.verify() }.permitsRequests, "NL allowed")
+
+    geo.set("ipinfo.io", (200, "DE"))
+    try expect(runBlocking { await gate.verify() }.permitsRequests, "cached within TTL")
+    try expect(geo.count("ipinfo.io") == 1, "one lookup covers a poll's calls")
+
+    runBlocking { await gate.invalidate() }
+    let afterChange = runBlocking { await gate.verify() }
+    try expect(!afterChange.permitsRequests, "network change re-checks and blocks on DE")
+    try expect(geo.count("ipinfo.io") == 2 && geo.count("1.1.1.1") == 2, "both sources asked again")
+
+    geo.set("ipinfo.io", nil) // unreachable
+    runBlocking { await gate.invalidate() }
+    let unreachable = runBlocking { await gate.verify() }
+    try expect(!unreachable.permitsRequests, "unreachable source blocks")
+    try expect(unreachable.check?.summary == "GeoIP lookup failed (ipinfo.io: unreachable)", unreachable.check?.summary ?? "nil")
+
+    let empty = makeGate(geo, allowed: [])
+    try expect(!runBlocking { await empty.verify() }.permitsRequests, "no allowed countries: nothing goes out")
+}
+
+func testGeoGatedClientNeverSendsWhenBlocked() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, "DE")])
+    let base = CountingHTTPClient()
+    let client = GeoGatedHTTPClient(base: base, gate: makeGate(geo, allowed: ["NL"]))
+    let request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+    let outcome: String = runBlocking {
+        do { _ = try await client.data(for: request); return "sent" }
+        catch UsageError.geoBlocked(let summary) { return summary }
+        catch { return "other: \(error)" }
+    }
+    try expect(outcome == "exit IP in DE", "blocked with summary: \(outcome)")
+    try expect(base.requestCount == 0, "the provider request was never sent")
+
+    let geoNL = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "ipinfo.io": (200, "NL")])
+    let allowedClient = GeoGatedHTTPClient(base: base, gate: makeGate(geoNL, allowed: ["NL"]))
+    _ = runBlocking { try? await allowedClient.data(for: request) }
+    try expect(base.requestCount == 1, "allowed: sent once")
+}
+
+func testProvidersReportGeoBlockWithoutSending() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, "DE")])
+    let gate = makeGate(geo, allowed: ["NL"])
+
+    let codexBase = CountingHTTPClient()
+    let codex = CodexProvider(authReader: StubCodexAuth(accountID: "a"), httpClient: GeoGatedHTTPClient(base: codexBase, gate: gate))
+    let codexResult = runBlocking { await codex.fetchUsage() }
+    guard case .failure(.geoBlocked) = codexResult else { throw TestFailure(description: "Codex: expected geoBlocked, got \(codexResult)") }
+    try expect(codexBase.requestCount == 0, "Codex sent nothing")
+
+    // An expired own credential would be refreshed: the refresh must not go
+    // out either, and the login must not be reported as expired.
+    let reader = StubClaudeReader([
+        ClaudeCredentialCandidate(credentials: ClaudeCredentials(accessToken: "own-old", refreshToken: "own-rt", expiresAt: pastMillis), source: .claudexbar)
+    ])
+    let claudeBase = RoutingHTTPClient(refreshStatus: 200, usageStatusByToken: [:], usageBody: Data())
+    let claude = ClaudeProvider(credentialReader: reader, httpClient: GeoGatedHTTPClient(base: claudeBase, gate: gate), persistRefreshed: { _ in })
+    let claudeResult = runBlocking { await claude.fetchUsage() }
+    guard case .failure(.geoBlocked) = claudeResult else { throw TestFailure(description: "Claude: expected geoBlocked, got \(claudeResult)") }
+    try expect(claudeBase.requests.isEmpty, "Claude sent nothing, not even the token refresh")
+    try expect(reader.discardCount == 0, "the own session is kept")
+}
+
+func testGeoBlockedErrorIsTransientWithGeoLabel() throws {
+    let error = UsageError.geoBlocked("exit IP in DE")
+    try expect(error.statusLabel == "geo", "menu shows geo")
+    try expect(error.isTransient, "last numbers stay on screen")
+    try expect(error.sanitizedDescription == "Blocked by Paranoid Mode: exit IP in DE", error.sanitizedDescription)
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("country code normalization", testCountryCodeNormalization),
+    ("GeoIP sources parse answers", testGeoSourcesParseTheirAnswers),
+    ("geo check needs every answer allowed", testGeoCheckNeedsEveryAllowedAnswer),
+    ("geo gate off sends nothing", testGeoGateOffSendsNothing),
+    ("geo gate blocks, allows, caches, re-checks", testGeoGateBlocksAndAllows),
+    ("gated client never sends when blocked", testGeoGatedClientNeverSendsWhenBlocked),
+    ("providers report geo block without sending", testProvidersReportGeoBlockWithoutSending),
+    ("geoBlocked is transient with geo label", testGeoBlockedErrorIsTransientWithGeoLabel),
     ("Retry-After parsed and kept", testRetryAfterIsParsedAndKept),
     ("Claude identity and banked-resets status", testClaudeIdentityAndResetsStatus),
     ("golden hour late anchor and slept-through", testGoldenHourLateAnchorAndSleptThrough),

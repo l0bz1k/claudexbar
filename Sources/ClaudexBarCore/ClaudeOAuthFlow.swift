@@ -109,6 +109,8 @@ public final class ClaudeOAuthFlow: @unchecked Sendable {
         case exchange(status: Int)
         case parse
         case keychain
+        /// Paranoid Mode held the code exchange back; nothing was sent.
+        case geoBlocked(String)
     }
 
     static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -121,12 +123,17 @@ public final class ClaudeOAuthFlow: @unchecked Sendable {
     private let state: String
     private let store: ClaudeCredentialStore
     private let session: URLSession
+    private let gate: GeoGate?
 
-    public init(store: ClaudeCredentialStore = ClaudeCredentialStore(), session: URLSession = .claudexbar) {
+    /// - Parameter gate: Paranoid Mode's gate, asked right before the code
+    ///   exchange (the user may have spent minutes in the browser, and the
+    ///   route may have changed since the flow began).
+    public init(store: ClaudeCredentialStore = ClaudeCredentialStore(), session: URLSession = .claudexbar, gate: GeoGate? = nil) {
         self.pkce = PKCEChallenge.random()
         self.state = base64URLEncode(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
         self.store = store
         self.session = session
+        self.gate = gate
     }
 
     /// The URL to open in the user's browser to begin sign-in.
@@ -171,6 +178,10 @@ public final class ClaudeOAuthFlow: @unchecked Sendable {
             "code_verifier": pkce.verifier,
             "state": state
         ])
+
+        if let gate, case .checked(let check) = await gate.verify(), !check.permitsRequests {
+            return .failure(.geoBlocked(check.summary))
+        }
 
         do {
             let (data, response) = try await session.data(for: request)

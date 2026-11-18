@@ -171,6 +171,10 @@ public struct ClaudeProvider: UsageProvider {
             do {
                 let refreshed = try await refreshAccessToken(refreshToken)
                 return try await fetchUsage(accessToken: refreshed.accessToken, refreshToken: nil)
+            } catch UsageError.geoBlocked(let summary) {
+                // Paranoid Mode stopped the refresh before it was sent: the
+                // refresh token is unspent and the login is fine.
+                return .failure(.geoBlocked(summary))
             } catch {
                 return .failure(.authExpired)
             }
