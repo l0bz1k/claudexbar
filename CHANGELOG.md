@@ -3,6 +3,22 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Paranoid Mode** (opt-in, off by default): Claude and Codex requests
+  are sent only while the exit IP is in an allowed country (default:
+  Netherlands). Before every request — usage, profile, token refresh, the
+  sign-in code exchange, re-auth and the auto-start anchor — the country is
+  looked up with two GeoIP services (`1.1.1.1/cdn-cgi/trace`,
+  `ipinfo.io/country`); both must report an allowed country, and a failed
+  lookup blocks. A held-back request is never sent, so a refresh token isn't
+  spent and a login isn't reported as expired. One lookup covers a poll
+  (20 s), dropped on any network change. The menu shows `geo` at once; the
+  tray dims the last reading after 5 held-back polls in a row. Presets NL,
+  DE, LV, FR, GB, FI, NO, DK, PL, ES, IT, US, plus any ISO code.
+  OpenRouter and OpenCode are not affected.
+
 ## [0.10.6] — 2026-11-12
 
 ### Fixed
