@@ -310,6 +310,12 @@ final class AppSettings {
         return ParanoidConfiguration(allowedCountries: Set(readAllowedCountries(defaults)))
     }
 
+    /// UTC day ("2026-11-18") of the last "GeoIP quota ran out" notification.
+    var paranoidQuotaNotifiedDay: String? {
+        get { defaults.string(forKey: "paranoidQuotaNotifiedDay") }
+        set { defaults.set(newValue, forKey: "paranoidQuotaNotifiedDay") }
+    }
+
     private static func readAllowedCountries(_ defaults: UserDefaults) -> [String] {
         guard let stored = defaults.array(forKey: paranoidCountriesKey) as? [String] else {
             return paranoidDefaultCountries

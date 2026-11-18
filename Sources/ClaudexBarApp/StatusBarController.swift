@@ -1507,8 +1507,38 @@ final class StatusBarController: NSObject {
     private func updateLastGeoCheck() {
         Task { [weak self] in
             let check = await ParanoidMode.gate.lastCheck
-            await MainActor.run { self?.lastGeoCheck = check }
+            await MainActor.run {
+                guard let self else { return }
+                self.lastGeoCheck = check
+                if let check { self.reportGeoQuotaIfExhausted(check) }
+            }
         }
+    }
+
+    /// A GeoIP service's request quota ran out: Paranoid Mode keeps holding
+    /// requests (fail-closed), so say why — once a day in the log and as a
+    /// notification, every time in the menu and tooltip.
+    private func reportGeoQuotaIfExhausted(_ check: GeoCheck) {
+        let sources = check.quotaExhaustedSources
+        guard settings.paranoidModeEnabled, !sources.isEmpty else { return }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = formatter.string(from: Date())
+        guard settings.paranoidQuotaNotifiedDay != today else { return }
+        settings.paranoidQuotaNotifiedDay = today
+
+        let names = sources.joined(separator: ", ")
+        let hint = sources.contains("ipinfo.io") && !ParanoidMode.ipinfoToken.isSet
+            ? " Add a free IPinfo Lite token under Paranoid Mode to remove the limit."
+            : ""
+        logger.log(provider: activeProvider, message: "paranoid mode: GeoIP quota exhausted at \(names) — holding Claude/Codex requests until it resets")
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Paranoid Mode: GeoIP limit reached"
+        content.body = "\(names) stopped answering (request limit). Claude and Codex requests are on hold until it resets.\(hint)"
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "paranoid-quota-\(today)", content: content, trigger: nil))
     }
 
     private func paranoidMenu() -> NSMenuItem {
@@ -1539,6 +1569,16 @@ final class StatusBarController: NSObject {
             submenu.addItem(item)
         }
         submenu.addItem(NSMenuItem(title: "Add Country Code…", action: #selector(addParanoidCountry), keyEquivalent: "", target: self))
+        submenu.addItem(.separator())
+
+        let hasToken = ParanoidMode.ipinfoToken.isSet
+        let tokenStatus = NSMenuItem(title: hasToken ? "IPinfo token: set — no daily limit" : "IPinfo token: not set — 1,000 checks/day, shared per IP", action: nil, keyEquivalent: "")
+        tokenStatus.isEnabled = false
+        submenu.addItem(tokenStatus)
+        submenu.addItem(NSMenuItem(title: hasToken ? "Change IPinfo Token…" : "Set IPinfo Token…", action: #selector(setIPInfoToken), keyEquivalent: "", target: self))
+        if hasToken {
+            submenu.addItem(NSMenuItem(title: "Remove IPinfo Token", action: #selector(removeIPInfoToken), keyEquivalent: "", target: self))
+        }
         submenu.addItem(.separator())
         let check = NSMenuItem(title: "Check Exit IP Now", action: #selector(checkParanoidNow), keyEquivalent: "", target: self)
         check.isEnabled = enabled
@@ -1624,6 +1664,39 @@ final class StatusBarController: NSObject {
         paranoidSettingsChanged()
     }
 
+    @objc private func setIPInfoToken() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "IPinfo Lite token"
+        alert.informativeText = "A free IPinfo Lite token (ipinfo.io → Dashboard → Lite) removes the 1,000-a-day limit on country checks. It is kept in your Keychain and sent only to api.ipinfo.io."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Token"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let token = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, token.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else {
+            NSSound.beep()
+            return
+        }
+        do {
+            try ParanoidMode.ipinfoToken.set(token)
+            logger.log(provider: activeProvider, message: "paranoid mode: IPinfo token saved")
+        } catch {
+            logger.log(provider: activeProvider, message: "paranoid mode: couldn't save the IPinfo token to the Keychain")
+            return
+        }
+        checkParanoidNow()
+    }
+
+    @objc private func removeIPInfoToken() {
+        ParanoidMode.ipinfoToken.clear()
+        logger.log(provider: activeProvider, message: "paranoid mode: IPinfo token removed")
+        checkParanoidNow()
+    }
+
     @objc private func checkParanoidNow() {
         Task { [weak self] in
             await ParanoidMode.gate.invalidate()
@@ -1631,6 +1704,7 @@ final class StatusBarController: NSObject {
             await MainActor.run {
                 guard let self else { return }
                 self.lastGeoCheck = verdict.check
+                if let check = verdict.check { self.reportGeoQuotaIfExhausted(check) }
                 self.logger.log(provider: self.activeProvider, message: "paranoid mode check: \(verdict.check?.summary ?? "off") — \(verdict.permitsRequests ? "sending" : "holding")")
             }
         }
