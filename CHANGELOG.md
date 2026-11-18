@@ -3,7 +3,7 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.1] — 2026-11-18
 
 ### Fixed
 - **Paste didn't work in ClaudexBar's dialogs.** ⌘V (and ⌘C, ⌘X, ⌘A, ⌘Z)
