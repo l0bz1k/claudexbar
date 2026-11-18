@@ -279,4 +279,41 @@ final class AppSettings {
         case .openrouter, .opencodeGo, .opencodeFree: break
         }
     }
+
+    // MARK: Paranoid Mode
+
+    /// Countries offered with a checkbox; any other ISO code can be added.
+    static let paranoidPresetCountries = ["NL", "DE", "LV", "FR", "GB", "FI", "NO", "DK", "PL", "ES", "IT", "US"]
+    static let paranoidDefaultCountries = ["NL"]
+
+    private static let paranoidEnabledKey = "paranoidModeEnabled"
+    private static let paranoidCountriesKey = "paranoidAllowedCountries"
+
+    var paranoidModeEnabled: Bool {
+        get { defaults.bool(forKey: Self.paranoidEnabledKey) }
+        set { defaults.set(newValue, forKey: Self.paranoidEnabledKey) }
+    }
+
+    /// Normalized, de-duplicated, sorted ISO codes.
+    var paranoidAllowedCountries: [String] {
+        get { Self.readAllowedCountries(defaults) }
+        set {
+            let codes = Set(newValue.compactMap(CountryCode.normalize))
+            defaults.set(codes.sorted(), forKey: Self.paranoidCountriesKey)
+        }
+    }
+
+    /// Read straight from UserDefaults (thread-safe), off the main thread,
+    /// by the gate before every Claude/Codex request. nil = mode off.
+    static func paranoidConfiguration(_ defaults: UserDefaults = .standard) -> ParanoidConfiguration? {
+        guard defaults.bool(forKey: paranoidEnabledKey) else { return nil }
+        return ParanoidConfiguration(allowedCountries: Set(readAllowedCountries(defaults)))
+    }
+
+    private static func readAllowedCountries(_ defaults: UserDefaults) -> [String] {
+        guard let stored = defaults.array(forKey: paranoidCountriesKey) as? [String] else {
+            return paranoidDefaultCountries
+        }
+        return Set(stored.compactMap(CountryCode.normalize)).sorted()
+    }
 }

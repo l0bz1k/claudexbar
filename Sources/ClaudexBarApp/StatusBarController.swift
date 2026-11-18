@@ -9,10 +9,12 @@ final class StatusBarController: NSObject {
     private let logger = SanitizedLogger.shared
     private let smartSwitchDetector = SmartProviderDetector()
     private let providers: [ProviderID: any UsageProvider] = [
-        .codex: CodexProvider(),
+        // Claude and Codex go through Paranoid Mode's gate (a pass-through
+        // while the mode is off); the API-key providers don't.
+        .codex: CodexProvider(httpClient: ParanoidMode.gatedClient()),
         // Persist rotated tokens after every refresh so ClaudexBar's own
         // credential stays valid without re-login.
-        .claude: ClaudeProvider(persistRefreshed: { credentials in
+        .claude: ClaudeProvider(httpClient: ParanoidMode.gatedClient(), persistRefreshed: { credentials in
             try? ClaudeCredentialStore().save(credentials)
         }, diagnostics: { line in
             SanitizedLogger.shared.log(provider: .claude, message: line)
@@ -49,6 +51,11 @@ final class StatusBarController: NSObject {
     /// Last error written to the log per provider, so a persistent condition
     /// (e.g. a provider with no key configured) is logged once, not every poll.
     private var lastLoggedError: [ProviderID: String] = [:]
+    /// Polls in a row that Paranoid Mode held back, per provider; any request
+    /// that actually goes out resets it.
+    private var geoBlockStreak: [ProviderID: Int] = [:]
+    /// Latest gate result, for the Paranoid Mode menu's status line.
+    private var lastGeoCheck: GeoCheck?
     private var opencodeFreeProbeInFlight = false
     private var presentedMenu: NSMenu?
     private var cliUpdateSnapshot: CLIUpdateSnapshot?
@@ -96,6 +103,7 @@ final class StatusBarController: NSObject {
         smartSwitchEngine = SmartProviderSwitchEngine(activeProvider: settings.activeProvider)
         configureButton()
         observeWake()
+        Task { await ParanoidMode.gate.startMonitoringNetworkChanges() }
         updateImage()
         refreshAll()
         scheduleTimers()
@@ -275,6 +283,7 @@ final class StatusBarController: NSObject {
                     evaluateResetNotifications(provider: provider, resets: snapshot.resets)
                     evaluateCreditNotifications(provider: provider, credit: snapshot.credit)
                     errors[provider] = nil
+                    geoBlockStreak[provider] = nil
                     // After rate limits, speed back up one step per success
                     // instead of jumping straight to the base interval (which
                     // just runs into the limit again — Claude's usage endpoint
@@ -291,6 +300,11 @@ final class StatusBarController: NSObject {
                     handleAutoStart(provider: provider, snapshot: snapshot)
                 case .failure(let error):
                     errors[provider] = error
+                    if case .geoBlocked = error {
+                        geoBlockStreak[provider, default: 0] += 1
+                    } else {
+                        geoBlockStreak[provider] = nil
+                    }
                     var message = error.sanitizedDescription
                     if case .rateLimited = error {
                         let strikes = (rateLimitBackoff[provider]?.strikes ?? 0) + 1
@@ -307,6 +321,7 @@ final class StatusBarController: NSObject {
                         logger.log(provider: provider, message: message)
                     }
                 }
+                if provider.isCodingCLI { updateLastGeoCheck() }
                 updateImage()
                 if notify {
                     evaluateNotifications()
@@ -324,6 +339,9 @@ final class StatusBarController: NSObject {
         switch errors[provider] {
         case nil: return true
         case .rateLimited?: return now.timeIntervalSince(snapshot.fetchedAt) < 15 * 60
+        // Paranoid Mode: the reading counts as current until several polls
+        // in a row were held back.
+        case .geoBlocked?: return (geoBlockStreak[provider] ?? 0) < ParanoidMode.staleAfterBlockedPolls
         default: return false
         }
     }
@@ -402,7 +420,26 @@ final class StatusBarController: NSObject {
             }
         }
 
+        // Paranoid Mode is asked right before the CLI is launched: the anchor
+        // is a real message to the provider. A held-back anchor isn't an
+        // attempt — no cooldown, no daily-cap use, no backoff.
+        let anchorTarget = goldenTarget
         autoStartInFlight.insert(provider)
+        Task { [weak self] in
+            let verdict = await ParanoidMode.gate.verify()
+            await MainActor.run {
+                guard let self else { return }
+                guard verdict.permitsRequests else {
+                    self.autoStartInFlight.remove(provider)
+                    self.logger.log(provider: provider, message: "auto-start: held back by Paranoid Mode (\(verdict.check?.summary ?? "not confirmed"))")
+                    return
+                }
+                self.launchAnchor(provider: provider, goldenTarget: anchorTarget)
+            }
+        }
+    }
+
+    private func launchAnchor(provider: ProviderID, goldenTarget: Date?) {
         autoStarter.recordAttempt(provider: provider, now: Date())
         if let goldenTarget {
             settings.setGoldenAnchoredFor(goldenTarget, for: provider)
@@ -604,6 +641,11 @@ final class StatusBarController: NSObject {
                 clock.dateFormat = "d MMM HH:mm"
                 let why = error.map { $0.sanitizedDescription } ?? "waiting for the first answer since launch"
                 tip = "Last known data, as of \(clock.string(from: snapshot.fetchedAt)) — \(why)\n" + tip
+            } else if case .geoBlocked(let summary)? = error {
+                let clock = DateFormatter()
+                clock.dateFormat = "HH:mm"
+                let streak = geoBlockStreak[activeProvider] ?? 0
+                tip = "As of \(clock.string(from: snapshot.fetchedAt)) — Paranoid Mode is holding requests (\(summary)); \(streak) of \(ParanoidMode.staleAfterBlockedPolls) blocked polls before the reading is marked stale\n" + tip
             } else if error == .rateLimited {
                 let clock = DateFormatter()
                 clock.dateFormat = "HH:mm"
@@ -778,6 +820,7 @@ final class StatusBarController: NSObject {
             menu.addItem(check)
         }
         menu.addItem(autoStartMenu())
+        menu.addItem(paranoidMenu())
         menu.addItem(displayMenu())
         menu.addItem(toggleItem(title: "Launch at Login", isOn: LaunchAgentManager.isEnabled(), action: #selector(toggleLaunchAtLogin)))
         menu.addItem(refreshIntervalMenu())
@@ -969,6 +1012,9 @@ final class StatusBarController: NSObject {
         }
         // The menu tells it straight: an error shows its status word ("net");
         // the tray keeps showing the last numbers, dimmed.
+        if case .geoBlocked? = errors[provider] {
+            return .status("geo")
+        }
         if let snapshot = snapshots[provider], errors[provider] == nil || isCurrent(provider) {
             let first = UsageFormatter.percentText(for: snapshot.primary, mode: settings.percentMode)
             if snapshot.secondary == nil, provider == .opencodeFree {
@@ -1276,12 +1322,42 @@ final class StatusBarController: NSObject {
         guard let raw = sender.representedObject as? String,
               let provider = ProviderID(rawValue: raw) else { return }
         switch provider {
-        case .codex: reauthCodex()
-        case .claude: reauthClaude()
+        case .codex: withParanoidClearance(for: .codex) { $0.reauthCodex() }
+        case .claude: withParanoidClearance(for: .claude) { $0.reauthClaude() }
         case .openrouter, .opencodeGo, .opencodeFree:
             // The key lives in opencode's auth store; `opencode auth login`
             // (re)adds it. The next poll picks it up.
             runInTerminal(providers[provider]?.reauthCommand())
+        }
+    }
+
+    /// Runs a re-auth only if Paranoid Mode lets Claude/Codex traffic out
+    /// right now; with the mode off it runs at once, as before.
+    private func withParanoidClearance(for provider: ProviderID, _ action: @escaping (StatusBarController) -> Void) {
+        guard settings.paranoidModeEnabled else {
+            action(self)
+            return
+        }
+        Task { [weak self] in
+            let verdict = await ParanoidMode.gate.verify()
+            await MainActor.run {
+                guard let self else { return }
+                self.updateLastGeoCheck()
+                if verdict.permitsRequests {
+                    action(self)
+                    return
+                }
+                let summary = verdict.check?.summary ?? "country not confirmed"
+                self.errors[provider] = .geoBlocked(summary)
+                self.logger.log(provider: provider, message: "reauth held back by Paranoid Mode (\(summary))")
+                self.updateImage()
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Paranoid Mode: \(provider.displayName) sign-in not started"
+                alert.informativeText = "Requests to \(provider.displayName) are held back: \(summary). Allowed: \(self.settings.paranoidAllowedCountries.joined(separator: ", "))."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
         }
     }
 
@@ -1426,6 +1502,140 @@ final class StatusBarController: NSObject {
         alert.runModal()
     }
 
+    // MARK: Paranoid Mode
+
+    private func updateLastGeoCheck() {
+        Task { [weak self] in
+            let check = await ParanoidMode.gate.lastCheck
+            await MainActor.run { self?.lastGeoCheck = check }
+        }
+    }
+
+    private func paranoidMenu() -> NSMenuItem {
+        let enabled = settings.paranoidModeEnabled
+        let allowed = settings.paranoidAllowedCountries
+        let parent = NSMenuItem(title: enabled ? "Paranoid Mode (\(allowed.joined(separator: ", ")))" : "Paranoid Mode", action: nil, keyEquivalent: "")
+        parent.state = enabled ? .on : .off
+        let submenu = NSMenu()
+
+        let toggle = toggleItem(title: "Only Send Claude / Codex Requests From Allowed Countries", isOn: enabled, action: #selector(toggleParanoidMode))
+        toggle.toolTip = "Before every Claude and Codex request (usage, token refresh, sign-in, auto-start anchor), ClaudexBar looks up its exit IP's country with two GeoIP services (1.1.1.1 and ipinfo.io). Nothing is sent unless both report an allowed country."
+        submenu.addItem(toggle)
+
+        let status = NSMenuItem(title: paranoidStatusLine(enabled: enabled), action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        submenu.addItem(status)
+        submenu.addItem(.separator())
+
+        let header = NSMenuItem(title: "Allowed Countries:", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        submenu.addItem(header)
+        let custom = allowed.filter { !AppSettings.paranoidPresetCountries.contains($0) }
+        for code in AppSettings.paranoidPresetCountries + custom {
+            let item = NSMenuItem(title: "\(code) — \(CountryCode.displayName(code))", action: #selector(toggleParanoidCountry(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = code
+            item.state = allowed.contains(code) ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(NSMenuItem(title: "Add Country Code…", action: #selector(addParanoidCountry), keyEquivalent: "", target: self))
+        submenu.addItem(.separator())
+        let check = NSMenuItem(title: "Check Exit IP Now", action: #selector(checkParanoidNow), keyEquivalent: "", target: self)
+        check.isEnabled = enabled
+        submenu.addItem(check)
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    private func paranoidStatusLine(enabled: Bool) -> String {
+        guard enabled else { return "Off — requests go out unchecked" }
+        guard let check = lastGeoCheck else { return "Not checked yet" }
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
+        let mark = check.permitsRequests ? "✓ sending" : "✗ holding requests"
+        return "\(check.summary.prefix(1).uppercased() + check.summary.dropFirst()) — \(mark) (\(clock.string(from: check.checkedAt)))"
+    }
+
+    /// Settings changed: drop the cached answer, start the streaks over and
+    /// poll again so the tray reflects the new rule right away.
+    private func paranoidSettingsChanged() {
+        geoBlockStreak = [:]
+        Task { [weak self] in
+            await ParanoidMode.gate.invalidate()
+            await MainActor.run {
+                guard let self else { return }
+                if !self.settings.paranoidModeEnabled { self.lastGeoCheck = nil }
+                self.refresh(provider: .claude)
+                self.refresh(provider: .codex)
+            }
+        }
+    }
+
+    @objc private func toggleParanoidMode() {
+        settings.paranoidModeEnabled.toggle()
+        logger.log(provider: activeProvider, message: "paranoid mode \(settings.paranoidModeEnabled ? "on" : "off"), allowed \(settings.paranoidAllowedCountries.joined(separator: ","))")
+        paranoidSettingsChanged()
+    }
+
+    @objc private func toggleParanoidCountry(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String else { return }
+        var allowed = settings.paranoidAllowedCountries
+        if let index = allowed.firstIndex(of: code) {
+            // Keep at least one: an empty list would silently block everything.
+            guard allowed.count > 1 else {
+                NSSound.beep()
+                return
+            }
+            allowed.remove(at: index)
+        } else {
+            allowed.append(code)
+        }
+        settings.paranoidAllowedCountries = allowed
+        logger.log(provider: activeProvider, message: "paranoid mode allowed countries: \(settings.paranoidAllowedCountries.joined(separator: ","))")
+        paranoidSettingsChanged()
+    }
+
+    @objc private func addParanoidCountry() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Allow another country"
+        alert.informativeText = "Enter a two-letter ISO 3166-1 country code (for example BE, SE, CH)."
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        field.placeholderString = "e.g. BE"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let input = field.stringValue
+        guard let code = CountryCode.normalize(input), CountryCode.isKnownRegion(code) else {
+            let error = NSAlert()
+            error.messageText = "“\(input.trimmingCharacters(in: .whitespacesAndNewlines))” isn't a country code"
+            error.informativeText = "Use a two-letter ISO 3166-1 alpha-2 code, like NL or DE."
+            error.addButton(withTitle: "OK")
+            error.runModal()
+            return
+        }
+        guard !settings.paranoidAllowedCountries.contains(code) else { return }
+        settings.paranoidAllowedCountries = settings.paranoidAllowedCountries + [code]
+        logger.log(provider: activeProvider, message: "paranoid mode allowed countries: \(settings.paranoidAllowedCountries.joined(separator: ","))")
+        paranoidSettingsChanged()
+    }
+
+    @objc private func checkParanoidNow() {
+        Task { [weak self] in
+            await ParanoidMode.gate.invalidate()
+            let verdict = await ParanoidMode.gate.verify()
+            await MainActor.run {
+                guard let self else { return }
+                self.lastGeoCheck = verdict.check
+                self.logger.log(provider: self.activeProvider, message: "paranoid mode check: \(verdict.check?.summary ?? "off") — \(verdict.permitsRequests ? "sending" : "holding")")
+            }
+        }
+    }
+
     private func displayMenu() -> NSMenuItem {
         let parent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -1502,7 +1712,7 @@ final class StatusBarController: NSObject {
     private func runClaudeReauth() {
         guard !claudeReauthInProgress else { return }
 
-        let flow = ClaudeOAuthFlow()
+        let flow = ClaudeOAuthFlow(gate: ParanoidMode.gate)
         NSWorkspace.shared.open(flow.authorizeURL())
         logger.log(provider: .claude, message: "reauth started")
 
@@ -1570,6 +1780,7 @@ final class StatusBarController: NSObject {
         case .exchange(let status): return "exchange_http_\(status)"
         case .parse: return "parse"
         case .keychain: return "keychain"
+        case .geoBlocked: return "paranoid_mode"
         }
     }
 

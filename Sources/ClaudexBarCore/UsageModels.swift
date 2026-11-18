@@ -153,6 +153,9 @@ public enum UsageError: Error, Equatable, Sendable {
     case blockedByEdge(ip: String?)
     /// The CLI keeps its login where ClaudexBar can't read it.
     case unsupportedCredentialStore(String)
+    /// Paranoid Mode held the request back: the exit IP isn't in an allowed
+    /// country, or its country couldn't be confirmed. Nothing was sent.
+    case geoBlocked(String)
 
     public var statusLabel: String {
         switch self {
@@ -164,6 +167,8 @@ public enum UsageError: Error, Equatable, Sendable {
             return "err"
         case .blockedByEdge:
             return "vpn"
+        case .geoBlocked:
+            return "geo"
         }
     }
 
@@ -172,7 +177,9 @@ public enum UsageError: Error, Equatable, Sendable {
     /// the pill to a status word.
     public var isTransient: Bool {
         switch self {
-        case .network, .rateLimited, .server:
+        // Paranoid Mode keeps the last numbers on screen; the app dims them
+        // only after several blocked polls in a row.
+        case .network, .rateLimited, .server, .geoBlocked:
             return true
         // A block persists until the route changes; showing stale numbers
         // without saying so would hide that.
@@ -204,6 +211,8 @@ public enum UsageError: Error, Equatable, Sendable {
             return "Blocked by Cloudflare for\(address) — likely the VPN/proxy exit; try another node"
         case .unsupportedCredentialStore(let message):
             return message
+        case .geoBlocked(let summary):
+            return "Blocked by Paranoid Mode: \(summary)"
         }
     }
 }
