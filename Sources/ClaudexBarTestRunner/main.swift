@@ -2538,7 +2538,20 @@ func testBlockedVerdictIsNotRecheckedEveryPoll() throws {
     try expect(geo.count("ipinfo.io") == 4, "allowed answers are re-checked each poll (20 s cache)")
 }
 
+func testGeoProbeWorksWithModeOff() throws {
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "ipinfo.io": (200, "NL")])
+    let gate = makeGate(geo, allowed: nil) // mode off
+    let check = runBlocking { await gate.probe(allowedCountries: ["nl"]) }
+    try expect(check.permitsRequests && check.observedCountries == ["NL"], "probe looks up even with the mode off: \(check.summary)")
+    try expect(geo.count("ipinfo.io") == 1, "one fresh lookup")
+    try expect(runBlocking { await gate.lastCheck } == nil, "with the mode off it doesn't become the gate's answer")
+    try expect(runBlocking { await gate.verify() } == .disabled, "mode still off")
+    let blocked = runBlocking { await gate.probe(allowedCountries: ["DE"]) }
+    try expect(!blocked.permitsRequests && geo.count("ipinfo.io") == 2, "probe always asks again")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("geo probe works with the mode off", testGeoProbeWorksWithModeOff),
     ("IPinfo Lite with token in header only", testIPInfoUsesLiteWithTokenInHeaderOnly),
     ("GeoIP quota and token failures named", testGeoQuotaAndTokenFailuresAreNamed),
     ("blocked verdict not re-checked every poll", testBlockedVerdictIsNotRecheckedEveryPoll),

@@ -1580,8 +1580,8 @@ final class StatusBarController: NSObject {
             submenu.addItem(NSMenuItem(title: "Remove IPinfo Token", action: #selector(removeIPInfoToken), keyEquivalent: "", target: self))
         }
         submenu.addItem(.separator())
-        let check = NSMenuItem(title: "Check Exit IP Now", action: #selector(checkParanoidNow), keyEquivalent: "", target: self)
-        check.isEnabled = enabled
+        let check = NSMenuItem(title: "Check Exit IP Now…", action: #selector(checkParanoidNow), keyEquivalent: "", target: self)
+        check.toolTip = "Ask both GeoIP services now and show what they see — works with Paranoid Mode off too."
         submenu.addItem(check)
 
         parent.submenu = submenu
@@ -1697,17 +1697,68 @@ final class StatusBarController: NSObject {
         checkParanoidNow()
     }
 
+    /// Looks the exit IP up right now and shows the answer in a dialog —
+    /// also with the mode off, to see what it would decide before enabling.
     @objc private func checkParanoidNow() {
+        let allowed = Set(settings.paranoidAllowedCountries)
         Task { [weak self] in
-            await ParanoidMode.gate.invalidate()
-            let verdict = await ParanoidMode.gate.verify()
+            let check = await ParanoidMode.gate.probe(allowedCountries: allowed)
             await MainActor.run {
                 guard let self else { return }
-                self.lastGeoCheck = verdict.check
-                if let check = verdict.check { self.reportGeoQuotaIfExhausted(check) }
-                self.logger.log(provider: self.activeProvider, message: "paranoid mode check: \(verdict.check?.summary ?? "off") — \(verdict.permitsRequests ? "sending" : "holding")")
+                let enabled = self.settings.paranoidModeEnabled
+                if enabled {
+                    self.lastGeoCheck = check
+                    self.reportGeoQuotaIfExhausted(check)
+                    // Let a provider that was held back try again at once.
+                    self.refresh(provider: .claude)
+                    self.refresh(provider: .codex)
+                }
+                self.logger.log(provider: self.activeProvider, message: "paranoid mode check: \(check.summary) — \(check.permitsRequests ? "allowed" : "not allowed")")
+                self.showGeoCheckResult(check, enabled: enabled)
             }
         }
+    }
+
+    private func showGeoCheckResult(_ check: GeoCheck, enabled: Bool) {
+        let allowedText = check.allowedCountries.sorted().joined(separator: ", ")
+        let alert = NSAlert()
+        alert.alertStyle = check.permitsRequests ? .informational : .warning
+        let where_ = check.observedCountries.isEmpty
+            ? "Exit country unknown"
+            : "Exit IP in \(check.observedCountries.map { "\($0) (\(CountryCode.displayName($0)))" }.joined(separator: " / "))"
+        switch (enabled, check.permitsRequests) {
+        case (true, true): alert.messageText = "✓ \(where_) — Claude and Codex requests are sent"
+        case (true, false): alert.messageText = "✗ \(where_) — Claude and Codex requests are on hold"
+        case (false, true): alert.messageText = "\(where_) — would be allowed"
+        case (false, false): alert.messageText = "\(where_) — would be held back"
+        }
+
+        var lines: [String] = []
+        for observation in check.observations {
+            let label: String
+            if observation.source == "ipinfo.io" {
+                label = ParanoidMode.ipinfoToken.isSet ? "ipinfo.io (Lite token)" : "ipinfo.io (no token — 1,000/day per IP)"
+            } else if observation.source == "1.1.1.1" {
+                label = "Cloudflare 1.1.1.1"
+            } else {
+                label = observation.source
+            }
+            let answer = observation.country.map { "\($0) — \(CountryCode.displayName($0))" } ?? "✗ \(observation.failure ?? "no answer")"
+            lines.append("\(label): \(answer)")
+        }
+        lines.append("")
+        lines.append("Allowed: \(allowedText.isEmpty ? "none" : allowedText)")
+        if !check.permitsRequests {
+            lines.append("Why: \(check.summary)")
+        }
+        if !enabled {
+            lines.append("")
+            lines.append("Paranoid Mode is off: requests currently go out unchecked.")
+        }
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func displayMenu() -> NSMenuItem {
