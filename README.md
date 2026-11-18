@@ -63,6 +63,13 @@ The OpenRouter and OpenCode keys are read from opencode's own store (`~/.local/s
 - If you're already working at the anchor time, you get one notification that today's golden hour isn't reachable, and the regular schedule continues until tomorrow.
 - Tip: choose a time on a 10-minute mark (14:00, 14:10) — Claude rounds a window's start to 10 minutes.
 
+**Paranoid Mode** (opt-in)
+- Claude and Codex requests leave the Mac only from the countries you allow (default: Netherlands). Before every request — usage, token refresh, sign-in, the auto-start anchor — ClaudexBar looks up its exit IP's country with two independent GeoIP services (`1.1.1.1/cdn-cgi/trace` and `ipinfo.io/country`); nothing is sent unless **both** report an allowed country. A lookup that fails or times out also blocks (fail-closed).
+- One lookup covers the few calls of a poll (cached 20 s) and is discarded the moment the network changes (VPN up/down, Wi-Fi switch).
+- Allowed countries: NL, DE, LV, FR, GB, FI, NO, DK, PL, ES, IT, US, or any ISO 3166-1 code via **Add Country Code…**. OpenRouter and OpenCode aren't affected.
+- A held-back poll shows `geo` in the menu; the tray keeps the last reading and dims it after 5 held-back polls in a row. **Check Exit IP Now** shows what the services currently see.
+- The lookups go out from the ClaudexBar process itself, so per-process routing rules send them the same way as the provider requests. The auto-start anchor runs the `claude`/`codex` CLI as its own process: the check happens right before it starts, but if your routing rules match by process name, include those CLIs too.
+
 **Check OpenCode Free Hourly** (opt-in)
 - While OpenCode Free isn't ready, ask one of its free models once an hour — through your own `opencode`, in a separate clean profile, with the model chosen from what you use and what the catalog currently lists — and count down to the next check in the tray.
 
@@ -115,7 +122,7 @@ This does not touch the Claude Code, Codex or opencode credentials.
 
 - **Provider rows** — one per provider, each with its live figures (`session · weekly`, or a status word). Clicking a row toggles its checkmark without closing the menu; the checkmark only decides whether that provider takes part in the tray rotation. With none checked, the tray shows `off`.
 - **⌥ Option** reveals the re-auth action for each provider, and swaps **Refresh All** for **Open Logs…**.
-- **Refresh All**, **Smart Auto Switch**, **Auto-start 5h Session** (with **AI Golden Hour**), **Display**, **Launch at Login**, **Refresh Interval**, **Notify When Remaining**, **CLI Updates**, **Check for Updates…**, **Copy Diagnostics**.
+- **Refresh All**, **Smart Auto Switch**, **Auto-start 5h Session** (with **AI Golden Hour**), **Paranoid Mode**, **Display**, **Launch at Login**, **Refresh Interval**, **Notify When Remaining**, **CLI Updates**, **Check for Updates…**, **Copy Diagnostics**.
 
 In the tray, the left column is the session (5-hour) window and the right column is the longer one (weekly, or monthly on some plans); the small label above each figure is the time until that window resets. Session usage also chips away at the weekly budget.
 
@@ -129,6 +136,7 @@ In the tray, the left column is the session (5-hour) window and the right column
 | `no opencode` | opencode isn't installed or has never run | Install and run opencode once |
 | `net` | The service couldn't be reached and there's no earlier data to show | Usually temporary; check your network or proxy |
 | `vpn` | Cloudflare blocked your IP (often a VPN/proxy exit) — the tooltip names it | Switch to another proxy node |
+| `geo` | Paranoid Mode held the request back: the exit IP isn't in an allowed country, or couldn't be confirmed — the tooltip says which | Switch the VPN/proxy to an allowed country, or adjust **Paranoid Mode** |
 | `err` | An unexpected answer from the service | **Copy Diagnostics** and open an issue |
 
 Temporary problems (a rate limit, a network blip) don't blank the tray: the last known values stay there, dimmed (they survive a restart too), while the menu shows the status word; and after an HTTP 429 the next request to that service waits 2, 4, 8… minutes (up to 10). **Refresh All** always goes out immediately.
