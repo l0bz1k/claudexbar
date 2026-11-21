@@ -2357,7 +2357,8 @@ private func trace(_ loc: String) -> (status: Int, body: String) {
 }
 
 private func makeGate(_ geo: GeoStubHTTPClient, allowed: Set<String>?) -> GeoGate {
-    GeoGate(configuration: { allowed.map { ParanoidConfiguration(allowedCountries: $0) } }, httpClient: geo, cacheTTL: 60)
+    GeoGate(configuration: { allowed.map { ParanoidConfiguration(allowedCountries: $0) } },
+            sources: [CloudflareTraceGeoSource(), IPInfoGeoSource()], httpClient: geo, cacheTTL: 60)
 }
 
 func testCountryCodeNormalization() throws {
@@ -2550,7 +2551,84 @@ func testGeoProbeWorksWithModeOff() throws {
     try expect(!blocked.permitsRequests && geo.count("ipinfo.io") == 2, "probe always asks again")
 }
 
+private func geojs(_ cc: String, ip: String = "38.117.87.94") -> (status: Int, body: String) {
+    (200, #"{"organization_name":"Nextremum s.r.o.","country_code":"\#(cc)","ip":"\#(ip)","city":"Amsterdam","country":"Netherlands"}"#)
+}
+
+private func traceIP(_ loc: String, ip: String) -> (status: Int, body: String) {
+    (200, "fl=1\nh=1.1.1.1\nip=\(ip)\nts=1.0\nloc=\(loc)\n")
+}
+
+private func threeSourceGate(_ geo: GeoStubHTTPClient, allowed: Set<String>, trusted: Set<String> = []) -> GeoGate {
+    GeoGate(configuration: { ParanoidConfiguration(allowedCountries: allowed, trustedIPs: trusted) }, httpClient: geo, cacheTTL: 60)
+}
+
+func testIPAddressNormalization() throws {
+    try expect(IPAddressText.normalize(" 38.117.87.94\n") == "38.117.87.94", "IPv4")
+    try expect(IPAddressText.normalize("2001:DB8:0:0::1") == "2001:db8::1", "IPv6 canonical: \(IPAddressText.normalize("2001:DB8:0:0::1") ?? "nil")")
+    try expect(IPAddressText.normalize("[2001:db8::1]") == "2001:db8::1", "bracketed IPv6")
+    try expect(IPAddressText.normalize("38.117.87") == nil && IPAddressText.normalize("example.com") == nil && IPAddressText.normalize("") == nil, "junk rejected")
+    try expect(ParanoidConfiguration(allowedCountries: [], trustedIPs: ["nope", "38.117.87.94"]).trustedIPs == ["38.117.87.94"], "config normalizes IPs")
+}
+
+func testGeoSourcesReportTheExitIP() throws {
+    try expect(CloudflareTraceGeoSource().parseIP(Data(traceIP("DE", ip: "38.117.87.94").body.utf8)) == "38.117.87.94", "trace ip=")
+    let lite = Data(#"{"ip":"38.117.87.94","country_code":"NL"}"#.utf8)
+    try expect(IPInfoGeoSource().parseIP(lite) == "38.117.87.94", "ipinfo ip")
+    let publicJSON = Data(#"{"ip":"38.117.87.94","city":"Amsterdam","country":"NL","org":"AS208962"}"#.utf8)
+    try expect(IPInfoGeoSource().parseCountry(publicJSON) == "NL", "public /json country")
+    try expect(GeoJSGeoSource().parseCountry(Data(geojs("NL").body.utf8)) == "NL", "geojs country_code")
+    try expect(GeoJSGeoSource().parseIP(Data(geojs("NL").body.utf8)) == "38.117.87.94", "geojs ip")
+    try expect(GeoJSGeoSource().parseCountry(Data("<html>".utf8)) == nil, "geojs junk")
+}
+
+func testTwoOfThreeSourcesDecide() throws {
+    // The real case: Cloudflare's database still says DE, IPinfo and GeoJS say NL.
+    let geo = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, #"{"ip":"38.117.87.94","country":"NL"}"#), "get.geojs.io": geojs("NL")])
+    let check = try expectNonNil(runBlocking { await threeSourceGate(geo, allowed: ["NL"]).verify() }.check, "checked")
+    try expect(check.majority == 2 && check.allowedVotes == 2, "2 of 3")
+    try expect(check.permitsRequests, "a majority of sources confirm NL: \(check.summary)")
+    try expect(check.summary == "exit IP in NL (2 of 3 sources; 1.1.1.1 says DE)", check.summary)
+
+    // One source down, the other two disagree: blocked.
+    let split = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (429, "limit"), "get.geojs.io": geojs("NL")])
+    let blocked = try expectNonNil(runBlocking { await threeSourceGate(split, allowed: ["NL"]).verify() }.check, "checked")
+    try expect(!blocked.permitsRequests, "1 of 3 isn't enough")
+    try expect(blocked.summary.contains("1 of 3 confirm an allowed country, 2 needed"), blocked.summary)
+    try expect(blocked.quotaExhaustedSources == ["ipinfo.io"], "quota still named")
+
+    // One source down, the other two agree on NL: allowed.
+    let down = GeoStubHTTPClient(["1.1.1.1": trace("NL"), "get.geojs.io": geojs("NL")])
+    try expect(runBlocking { await threeSourceGate(down, allowed: ["NL"]).verify() }.permitsRequests, "2 of 3 with one unreachable")
+
+    // Majority elsewhere: blocked.
+    let de = GeoStubHTTPClient(["1.1.1.1": trace("DE"), "ipinfo.io": (200, #"{"country":"DE"}"#), "get.geojs.io": geojs("NL")])
+    try expect(!runBlocking { await threeSourceGate(de, allowed: ["NL"]).verify() }.permitsRequests, "2 of 3 say DE")
+}
+
+func testTrustedExitIPPassesWhateverTheCountry() throws {
+    let ip = "38.117.87.94"
+    let allDE = GeoStubHTTPClient(["1.1.1.1": traceIP("DE", ip: ip), "ipinfo.io": (200, #"{"ip":"38.117.87.94","country":"DE"}"#), "get.geojs.io": geojs("DE")])
+    try expect(!runBlocking { await threeSourceGate(allDE, allowed: ["NL"]).verify() }.permitsRequests, "untrusted DE blocks")
+    let trusted = try expectNonNil(runBlocking { await threeSourceGate(allDE, allowed: ["NL"], trusted: [ip]).verify() }.check, "checked")
+    try expect(trusted.permitsRequests && trusted.permittedByTrustedIP && trusted.trustedExitIP == ip, "trusted IP passes")
+    try expect(trusted.summary == "exit IP 38.117.87.94 is trusted (sources say DE)", trusted.summary)
+
+    // Most sources see another IP (VPN switched node): the trust doesn't apply.
+    let moved = GeoStubHTTPClient(["1.1.1.1": traceIP("DE", ip: "198.51.100.9"), "ipinfo.io": (200, #"{"ip":"198.51.100.9","country":"DE"}"#), "get.geojs.io": geojs("DE", ip: ip)])
+    try expect(!runBlocking { await threeSourceGate(moved, allowed: ["NL"], trusted: [ip]).verify() }.permitsRequests, "only 1 of 3 sees the trusted IP")
+
+    // Trusted IPs alone (no countries) still mean a lookup, not "nothing allowed".
+    let onlyTrusted = try expectNonNil(runBlocking { await threeSourceGate(allDE, allowed: [], trusted: [ip]).verify() }.check, "checked")
+    try expect(onlyTrusted.permitsRequests, "trusted IP with no countries: \(onlyTrusted.summary)")
+    try expect(onlyTrusted.consensusIP == ip, "consensus IP for 'Trust Current Exit IP'")
+}
+
 let tests: [(String, () throws -> Void)] = [
+    ("IP address normalization", testIPAddressNormalization),
+    ("GeoIP sources report the exit IP", testGeoSourcesReportTheExitIP),
+    ("two of three sources decide", testTwoOfThreeSourcesDecide),
+    ("trusted exit IP passes whatever the country", testTrustedExitIPPassesWhateverTheCountry),
     ("geo probe works with the mode off", testGeoProbeWorksWithModeOff),
     ("IPinfo Lite with token in header only", testIPInfoUsesLiteWithTokenInHeaderOnly),
     ("GeoIP quota and token failures named", testGeoQuotaAndTokenFailuresAreNamed),

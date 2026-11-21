@@ -307,7 +307,20 @@ final class AppSettings {
     /// by the gate before every Claude/Codex request. nil = mode off.
     static func paranoidConfiguration(_ defaults: UserDefaults = .standard) -> ParanoidConfiguration? {
         guard defaults.bool(forKey: paranoidEnabledKey) else { return nil }
-        return ParanoidConfiguration(allowedCountries: Set(readAllowedCountries(defaults)))
+        return ParanoidConfiguration(allowedCountries: Set(readAllowedCountries(defaults)), trustedIPs: Set(readTrustedIPs(defaults)))
+    }
+
+    private static let paranoidTrustedIPsKey = "paranoidTrustedIPs"
+
+    /// Exit IPs that pass whatever country GeoIP puts them in. Canonical, sorted.
+    var paranoidTrustedIPs: [String] {
+        get { Self.readTrustedIPs(defaults) }
+        set { defaults.set(Set(newValue.compactMap(IPAddressText.normalize)).sorted(), forKey: Self.paranoidTrustedIPsKey) }
+    }
+
+    private static func readTrustedIPs(_ defaults: UserDefaults) -> [String] {
+        let stored = defaults.array(forKey: paranoidTrustedIPsKey) as? [String] ?? []
+        return Set(stored.compactMap(IPAddressText.normalize)).sorted()
     }
 
     /// UTC day ("2026-11-18") of the last "GeoIP quota ran out" notification.

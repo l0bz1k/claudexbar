@@ -1549,7 +1549,7 @@ final class StatusBarController: NSObject {
         let submenu = NSMenu()
 
         let toggle = toggleItem(title: "Only Send Claude / Codex Requests From Allowed Countries", isOn: enabled, action: #selector(toggleParanoidMode))
-        toggle.toolTip = "Before every Claude and Codex request (usage, token refresh, sign-in, auto-start anchor), ClaudexBar looks up its exit IP's country with two GeoIP services (1.1.1.1 and ipinfo.io). Nothing is sent unless both report an allowed country."
+        toggle.toolTip = "Before every Claude and Codex request (usage, token refresh, sign-in, auto-start anchor), ClaudexBar looks up its exit IP's country with three GeoIP services (Cloudflare 1.1.1.1, ipinfo.io, GeoJS). Nothing is sent unless at least two of them report an allowed country, or see one of your trusted exit IPs."
         submenu.addItem(toggle)
 
         let status = NSMenuItem(title: paranoidStatusLine(enabled: enabled), action: nil, keyEquivalent: "")
@@ -1569,6 +1569,25 @@ final class StatusBarController: NSObject {
             submenu.addItem(item)
         }
         submenu.addItem(NSMenuItem(title: "Add Country Code…", action: #selector(addParanoidCountry), keyEquivalent: "", target: self))
+        submenu.addItem(.separator())
+
+        let trustedHeader = NSMenuItem(title: "Trusted Exit IPs (pass whatever country GeoIP says):", action: nil, keyEquivalent: "")
+        trustedHeader.isEnabled = false
+        submenu.addItem(trustedHeader)
+        for ip in settings.paranoidTrustedIPs {
+            let item = NSMenuItem(title: ip, action: #selector(removeTrustedIP(_:)), keyEquivalent: "", target: self)
+            item.state = .on
+            item.representedObject = ip
+            item.toolTip = "Click to stop trusting \(ip)."
+            submenu.addItem(item)
+        }
+        if let current = lastGeoCheck?.consensusIP, !settings.paranoidTrustedIPs.contains(current) {
+            let trustCurrent = NSMenuItem(title: "Trust Current Exit IP (\(current))", action: #selector(trustCurrentIP(_:)), keyEquivalent: "", target: self)
+            trustCurrent.representedObject = current
+            trustCurrent.toolTip = "Most GeoIP sources see this IP now. Trust it only if it's your VPN's exit address."
+            submenu.addItem(trustCurrent)
+        }
+        submenu.addItem(NSMenuItem(title: "Add Trusted Exit IP…", action: #selector(addTrustedIP), keyEquivalent: "", target: self))
         submenu.addItem(.separator())
 
         let hasToken = ParanoidMode.ipinfoToken.isSet
@@ -1599,6 +1618,50 @@ final class StatusBarController: NSObject {
 
     /// Settings changed: drop the cached answer, start the streaks over and
     /// poll again so the tray reflects the new rule right away.
+    @objc private func removeTrustedIP(_ sender: NSMenuItem) {
+        guard let ip = sender.representedObject as? String else { return }
+        settings.paranoidTrustedIPs = settings.paranoidTrustedIPs.filter { $0 != ip }
+        logger.log(provider: activeProvider, message: "paranoid mode: trusted exit IPs now \(settings.paranoidTrustedIPs.count)")
+        paranoidSettingsChanged()
+    }
+
+    @objc private func trustCurrentIP(_ sender: NSMenuItem) {
+        guard let ip = sender.representedObject as? String else { return }
+        addTrusted(ip)
+    }
+
+    @objc private func addTrustedIP() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Trust an exit IP"
+        alert.informativeText = "Requests to Claude and Codex go out whenever most GeoIP sources see this IP, whatever country they put it in. Add only your VPN's own exit address (IPv4 or IPv6)."
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = lastGeoCheck?.consensusIP ?? "e.g. 203.0.113.7"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let input = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let ip = IPAddressText.normalize(input) else {
+            let error = NSAlert()
+            error.messageText = "“\(input)” isn't an IP address"
+            error.informativeText = "Enter one IPv4 (203.0.113.7) or IPv6 (2001:db8::1) address."
+            error.addButton(withTitle: "OK")
+            error.runModal()
+            return
+        }
+        addTrusted(ip)
+    }
+
+    private func addTrusted(_ ip: String) {
+        guard !settings.paranoidTrustedIPs.contains(ip) else { return }
+        settings.paranoidTrustedIPs = settings.paranoidTrustedIPs + [ip]
+        // The address itself isn't logged: the log may be shared.
+        logger.log(provider: activeProvider, message: "paranoid mode: trusted exit IPs now \(settings.paranoidTrustedIPs.count)")
+        paranoidSettingsChanged()
+    }
+
     private func paranoidSettingsChanged() {
         geoBlockStreak = [:]
         Task { [weak self] in
@@ -1701,8 +1764,9 @@ final class StatusBarController: NSObject {
     /// also with the mode off, to see what it would decide before enabling.
     @objc private func checkParanoidNow() {
         let allowed = Set(settings.paranoidAllowedCountries)
+        let trusted = Set(settings.paranoidTrustedIPs)
         Task { [weak self] in
-            let check = await ParanoidMode.gate.probe(allowedCountries: allowed)
+            let check = await ParanoidMode.gate.probe(allowedCountries: allowed, trustedIPs: trusted)
             await MainActor.run {
                 guard let self else { return }
                 let enabled = self.settings.paranoidModeEnabled
@@ -1723,9 +1787,15 @@ final class StatusBarController: NSObject {
         let allowedText = check.allowedCountries.sorted().joined(separator: ", ")
         let alert = NSAlert()
         alert.alertStyle = check.permitsRequests ? .informational : .warning
-        let where_ = check.observedCountries.isEmpty
-            ? "Exit country unknown"
-            : "Exit IP in \(check.observedCountries.map { "\($0) (\(CountryCode.displayName($0)))" }.joined(separator: " / "))"
+        let shown = check.permitsRequests ? check.observedCountries.filter(check.allowedCountries.contains) : check.observedCountries
+        let where_: String
+        if check.permittedByTrustedIP, let ip = check.trustedExitIP {
+            where_ = "Trusted exit IP \(ip)"
+        } else if shown.isEmpty {
+            where_ = "Exit country unknown"
+        } else {
+            where_ = "Exit IP in \(shown.map { "\($0) (\(CountryCode.displayName($0)))" }.joined(separator: " / "))"
+        }
         switch (enabled, check.permitsRequests) {
         case (true, true): alert.messageText = "✓ \(where_) — Claude and Codex requests are sent"
         case (true, false): alert.messageText = "✗ \(where_) — Claude and Codex requests are on hold"
@@ -1740,14 +1810,24 @@ final class StatusBarController: NSObject {
                 label = ParanoidMode.ipinfoToken.isSet ? "ipinfo.io (Lite token)" : "ipinfo.io (no token — 1,000/day per IP)"
             } else if observation.source == "1.1.1.1" {
                 label = "Cloudflare 1.1.1.1"
+            } else if observation.source == "geojs.io" {
+                label = "GeoJS"
             } else {
                 label = observation.source
             }
             let answer = observation.country.map { "\($0) — \(CountryCode.displayName($0))" } ?? "✗ \(observation.failure ?? "no answer")"
-            lines.append("\(label): \(answer)")
+            let seenIP = observation.ip.map { "  [\($0)]" } ?? ""
+            lines.append("\(label): \(answer)\(seenIP)")
         }
         lines.append("")
         lines.append("Allowed: \(allowedText.isEmpty ? "none" : allowedText)")
+        if !check.trustedIPs.isEmpty {
+            lines.append("Trusted exit IPs: \(check.trustedIPs.sorted().joined(separator: ", "))")
+        }
+        lines.append("Rule: \(check.majority) of \(check.observations.count) sources must confirm an allowed country (or see a trusted exit IP)")
+        if check.permitsRequests, check.allowedVotes < check.observations.count || check.permittedByTrustedIP {
+            lines.append("Passed: \(check.summary)")
+        }
         if !check.permitsRequests {
             lines.append("Why: \(check.summary)")
         }
