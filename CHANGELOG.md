@@ -3,6 +3,25 @@
 All notable changes to ClaudexBar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Paranoid Mode: three GeoIP sources, majority decides.** GeoJS
+  (`get.geojs.io`, no key, no published limit) joins Cloudflare and IPinfo;
+  requests go out when **2 of 3** confirm an allowed country. A failed
+  source still counts against, so with one down the other two must both
+  agree. Before, both of two had to agree — and when Cloudflare's database
+  moved an Amsterdam VPN exit to Germany right after IPinfo had fixed the
+  same mistake, requests stayed on hold although the exit never moved.
+
+### Added
+- **Paranoid Mode: trusted exit IPs.** Vouch for your VPN's exit address
+  (**Trust Current Exit IP** or **Add Trusted Exit IP…**): when most
+  sources see it, requests pass whatever country GeoIP reports. A different
+  IP (VPN switched node or dropped) falls back to the country rule.
+- The **Check Exit IP Now…** dialog shows the IP each service saw and the
+  rule applied.
+
 ## [0.11.1] — 2026-11-18
 
 ### Fixed

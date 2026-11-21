@@ -25,17 +25,34 @@ own, and you'd only be checking your home country.
 
 ## How it works
 
-1. Before a Claude or Codex request, ClaudexBar asks **two independent GeoIP
-   services** which country its current exit IP is in:
+1. Before a Claude or Codex request, ClaudexBar asks **three independent
+   GeoIP services** which country its current exit IP is in:
    - Cloudflare — `https://1.1.1.1/cdn-cgi/trace` (the `loc=` line);
    - IPinfo — `https://api.ipinfo.io/lite/me` with a token, or
-     `https://ipinfo.io/country` without one (see below).
-2. The request goes out only if **both** answer with a country on your list.
-3. Anything else blocks: a different country, the two services disagreeing,
-   a timeout (6 s), an error, an unreadable answer, a used-up quota. It
-   *fails closed*.
+     `https://ipinfo.io/json` without one (see below);
+   - GeoJS — `https://get.geojs.io/v1/ip/geo.json` (no key, no published
+     rate limit).
+2. The request goes out only if **at least two of the three** answer with a
+   country on your list — or see one of your [trusted exit IPs](#trusted-exit-ips).
+3. A service that fails counts *against*: a timeout (6 s), an error, an
+   unreadable answer or a used-up quota is a "no". With one service down,
+   the other two must both agree. It *fails closed*.
 4. A blocked request is never sent. A token refresh that's held back doesn't
    spend the refresh token, and your login isn't marked expired.
+
+### Why three, and why a majority
+
+GeoIP databases disagree, especially about VPN and hosting addresses, and
+each corrects itself on its own schedule. For one Amsterdam VPN exit, IPinfo
+said Germany for a while and then fixed it — just as Cloudflare's database
+started saying Germany. With two services that both had to agree, requests
+stayed on hold for days although the exit never moved. With three, one
+outdated database is outvoted; two that agree on another country still
+block.
+
+Keep in mind that Cloudflare sits in front of many websites and passes them
+the country *its* database names. When Cloudflare is the one outvoted, a
+Cloudflare-fronted service may still see you in that other country.
 
 The GeoIP lookups are made by the ClaudexBar process itself, through the same
 network session as the provider requests. So per-process routing rules
@@ -70,6 +87,22 @@ IP Now** to skip the wait.
 FI, NO, DK, PL, ES, IT and US. **Add Country Code…** accepts any two-letter
 ISO 3166-1 code (BE, SE, CH, …). You can allow several; at least one always
 stays checked. The default is the Netherlands (NL).
+
+## Trusted exit IPs
+
+If you know your VPN's exit address, you can vouch for it: **Paranoid Mode →
+Trust Current Exit IP (…)** (offered once a check has run) or **Add Trusted
+Exit IP…** (any IPv4 or IPv6 address). When at least two of the three
+services see a trusted IP, requests go out **whatever country the databases
+put it in**. This is the sturdiest check when the databases keep arguing: an
+address you know is yours beats anyone's guess about where it is.
+
+- If the VPN switches to another node or drops, the services see a different
+  IP and the country rule applies again — so a lost tunnel still blocks.
+- Trust only your own VPN's dedicated or fixed exit. A shared exit used by
+  many customers proves only that you're on that provider.
+- Click a trusted IP in the menu to remove it. The addresses aren't written
+  to the log; **Copy Diagnostics** shows only how many there are.
 
 ## The IPinfo token (recommended)
 
@@ -110,9 +143,10 @@ another program makes macOS ask for permission, again after every update.
 
 ## Reading the status
 
-**Check Exit IP Now…** asks both services right away and opens a dialog
-with the answer: each service's country (or why it failed), your allowed
-countries, and whether Claude/Codex requests are sent or on hold. It works
+**Check Exit IP Now…** asks all three services right away and opens a dialog
+with the answer: each service's country and the exit IP it saw (or why it
+failed), your allowed countries and trusted IPs, the rule ("2 of 3"), and
+whether Claude/Codex requests are sent or on hold. It works
 with Paranoid Mode off too — handy to see what it would decide before you
 turn it on. With the mode on, a successful check also lets a held-back
 Claude/Codex poll go out at once.
@@ -121,9 +155,11 @@ The same result stays in the **Paranoid Mode** submenu, second line:
 
 | Shown | Meaning |
 |---|---|
-| `Exit IP in NL — ✓ sending (12:03:41)` | Both services say NL; requests go out |
+| `Exit IP in NL — ✓ sending (12:03:41)` | All three services say NL; requests go out |
+| `Exit IP in NL (2 of 3 sources; 1.1.1.1 says DE) — ✓ sending` | Outvoted: one database disagrees, the majority says NL |
+| `Exit IP 203.0.113.7 is trusted (sources say DE) — ✓ sending` | A trusted exit IP; the country doesn't matter |
 | `Exit IP in DE — ✗ holding requests` | The exit country isn't allowed |
-| `GeoIP sources disagree (NL / DE) — ✗ …` | The two services see different countries (often a VPN that splits traffic) |
+| `GeoIP sources disagree (DE / NL); 1 of 3 confirm an allowed country, 2 needed — ✗ …` | Not enough agreement (often one service down plus one that disagrees) |
 | `GeoIP lookup failed (ipinfo.io: daily limit reached …) — ✗ …` | IPinfo's quota is used up — add a token |
 | `GeoIP lookup failed (ipinfo.io: token rejected (HTTP 403)) — ✗ …` | The token is wrong or revoked |
 | `GeoIP lookup failed (1.1.1.1: timed out) — ✗ …` | A service couldn't be reached |
@@ -148,7 +184,7 @@ leave the same way. It is **not** protection against:
 - **DNS leaks.** Resolving `api.anthropic.com` or `chatgpt.com` through your
   local DNS server happens outside this check.
 - **Split routing by destination.** If your VPN routes by domain or IP (not
-  by process), Cloudflare/IPinfo may go one way and Claude/Codex another.
+  by process), the GeoIP services may go one way and Claude/Codex another.
 - **IPv4 vs IPv6 paths** that exit in different places.
 - **The CLIs.** Auto-start sends its message through the `claude` / `codex`
   CLI, a separate process. The check runs right before the launch, but if
@@ -159,8 +195,11 @@ leave the same way. It is **not** protection against:
 
 - **Always `geo`, status says a country you didn't expect** — check which
   node your VPN is on, then **Check Exit IP Now…**.
-- **"sources disagree"** — your VPN sends some traffic another way; check
-  its split-tunnel / per-app settings.
+- **"sources disagree"** — first open **Check Exit IP Now…**: if all three
+  show the *same IP* but different countries, it's the databases arguing —
+  trust that IP (if it's really your VPN's). If they show *different IPs*,
+  your VPN sends some traffic another way; check its split-tunnel / per-app
+  settings.
 - **"daily limit reached"** — set an IPinfo token (above).
 - **"token rejected"** — copy the token again from the IPinfo dashboard.
 - **Turning it off** — uncheck the first item in **Paranoid Mode**; Claude
