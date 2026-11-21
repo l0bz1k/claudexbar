@@ -64,16 +64,16 @@ public enum IPAddressText {
         guard var text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
         if text.hasPrefix("["), text.hasSuffix("]") { text = String(text.dropFirst().dropLast()) }
         var v4 = in_addr()
-        if inet_pton(AF_INET, text, &v4) == 1 { return format(family: AF_INET, &v4, length: INET_ADDRSTRLEN) }
+        if inet_pton(AF_INET, text, &v4) == 1 {
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            return inet_ntop(AF_INET, &v4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil ? String(cString: buffer) : nil
+        }
         var v6 = in6_addr()
-        if inet_pton(AF_INET6, text, &v6) == 1 { return format(family: AF_INET6, &v6, length: INET6_ADDRSTRLEN) }
+        if inet_pton(AF_INET6, text, &v6) == 1 {
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            return inet_ntop(AF_INET6, &v6, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil ? String(cString: buffer) : nil
+        }
         return nil
-    }
-
-    private static func format<T>(family: Int32, _ address: inout T, length: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(length))
-        guard inet_ntop(family, &address, &buffer, socklen_t(length)) != nil else { return nil }
-        return String(cString: buffer)
     }
 }
 
